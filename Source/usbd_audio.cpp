@@ -108,6 +108,24 @@ USBD_ClassTypeDef  USBD_AUDIO =
 #define FB_REFRESH 5 /* Feedback refresh rate */
 #define FB_RATE (1<<FB_REFRESH)
 
+/* Closed-loop explicit feedback.
+ * The RX fill level is measured right after each OUT packet (peak of the sawtooth), averaged over
+ * one feedback period (32 ms) and smoothed. The deviation from the target level shifts the
+ * feedback value by FB_GAIN LSB (10.14) per frame of deviation, clamped to +-FB_CORR_MAX LSB.
+ * 1 LSB = 1/16384 frame/ms = 1.27 ppm. Measured drift without this (macOS): 1.15-1.7 ppm. */
+#define FB_RX_BUFFER_SAMPLES (AUDIO_RX_TOTAL_BUF_SIZE/sizeof(audio_t))
+#define FB_RX_PACKET_SAMPLES (AUDIO_RX_PACKET_SIZE/sizeof(audio_t))
+/* Target level after a packet: buffer centre + half a packet, so that the margin before the
+ * next packet (underrun) equals the margin after it (overrun) */
+#define FB_LEVEL_TARGET ((FB_RX_BUFFER_SAMPLES + FB_RX_PACKET_SAMPLES)/2)
+#define FB_GAIN 2 /* LSB per frame of deviation, time constant about 1/(2*0.061/s) = 8 s */
+#define FB_CORR_MAX 32 /* LSB, about 40 ppm */
+#define FB_EMA_SHIFT 3 /* smoothing over about 8 periods = 0.26 s */
+static int32_t fb_level_sum = 0; /* sum of fill levels in this period [samples] */
+static int32_t fb_level_n = 0;
+static int32_t fb_err_ema = 0; /* smoothed deviation << FB_EMA_SHIFT [samples] */
+static int32_t fb_corr = 0; /* current correction [LSB] */
+
 /**
   * @brief   get_usb_full_speed_rate
   *         Set feedback value from sample rate 
@@ -1380,11 +1398,27 @@ void usbd_audio_sof_callback(void){
   int samples = usbd_audio_get_rx_count(); // across channels and fb rate
   samples *= (1 << (14 - FB_REFRESH) ); // convert to n.14 format
   samples /= AUDIO_CHANNELS;
-  int current = haudio->fb_data.val;
+  /* closed loop: correction from the fill level of this period */
+  if(fb_level_n > 0){
+    int32_t err = fb_level_sum / fb_level_n - (int32_t)FB_LEVEL_TARGET; // > 0: too full
+    fb_level_sum = 0;
+    fb_level_n = 0;
+    fb_err_ema += err - (fb_err_ema >> FB_EMA_SHIFT);
+    int32_t corr = -((fb_err_ema >> FB_EMA_SHIFT) * FB_GAIN) / USBD_AUDIO_RX_CHANNELS;
+    if(corr > FB_CORR_MAX){
+      corr = FB_CORR_MAX;
+      debugMessage("fb clamp", (int)err, (int)corr);
+    }else if(corr < -FB_CORR_MAX){
+      corr = -FB_CORR_MAX;
+      debugMessage("fb clamp", (int)err, (int)corr);
+    }
+    fb_corr = corr;
+  }
+  int current = haudio->fb_data.val - fb_corr; // compare without correction
   if(std::abs(current - samples) < 0x4000){ // maximum 1 sample difference from current setting
-    haudio->fb_data.val = samples;
+    haudio->fb_data.val = samples + fb_corr;
   }else if(std::abs(current - samples * 2) < 0x4000){
-    haudio->fb_data.val = samples * 2; // adjust for devices with 1/2 readings
+    haudio->fb_data.val = samples * 2 + fb_corr; // adjust for devices with 1/2 readings
   }else if(haudio->fb_data.val){
     size_t capacity = rx_buffer.getWriteCapacity() + codec.getSampleCounter();
     debugMessage("fb", haudio->fb_data.val*1.0f/(1<<14), samples*1.0f/(1<<14));
@@ -1496,8 +1530,17 @@ static uint8_t  USBD_AUDIO_DataOut (USBD_HandleTypeDef *pdev, uint8_t epnum) {
       usbd_audio_rx_start_callback(USBD_AUDIO_RX_FREQ, USBD_AUDIO_RX_CHANNELS, &rx_buffer);
       rx_buffer.reset();
       rx_buffer.clear();
+#ifdef USE_USBD_RX_FB
+      // start at the target level of the feedback control, reset the control
+      size_t pos = len < FB_LEVEL_TARGET ? FB_LEVEL_TARGET - len : 0;
+      fb_level_sum = 0;
+      fb_level_n = 0;
+      fb_err_ema = 0;
+      fb_corr = 0;
+#else
       // Set write head to provide 1/2 buffer margin
       size_t pos = rx_buffer.getSize()/2 - len;
+#endif
       // Round to nearest frame
       pos = (pos / USBD_AUDIO_RX_CHANNELS) * USBD_AUDIO_RX_CHANNELS;
       rx_buffer.setWriteIndex(pos);
@@ -1511,6 +1554,18 @@ static uint8_t  USBD_AUDIO_DataOut (USBD_HandleTypeDef *pdev, uint8_t epnum) {
       usbd_audio_error("rx ovf", len - capacity);
     }
     rx_buffer.write((audio_t*)haudio->audio_rx_transmit, len);
+#ifdef USE_USBD_RX_FB
+    {
+      // fill level after the packet, minus the samples already consumed in the current block;
+      // read both values without being interrupted by the codec DMA interrupt
+      uint32_t primask = __get_PRIMASK();
+      __disable_irq();
+      int32_t level = (int32_t)rx_buffer.getReadCapacity() - (int32_t)codec.getSampleCounter();
+      __set_PRIMASK(primask);
+      fb_level_sum += level;
+      fb_level_n++;
+    }
+#endif
     /* Prepare Out endpoint to receive next audio packet */
     USBD_LL_PrepareReceive(pdev, AUDIO_RX_EP, (uint8_t*)haudio->audio_rx_transmit, AUDIO_RX_PACKET_SIZE);
 
