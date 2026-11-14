@@ -31,7 +31,7 @@
 // 84 too low, 92 too high
 #define AUDIO_INPUT_GAIN            88 // half decibel steps
 // 106 too low 114 too high
-#define AUDIO_OUTPUT_GAIN           114 // half decibel steps
+#define AUDIO_OUTPUT_GAIN           125 // half decibel steps (114 halves the thru level, see 5.3/4.99Vpp below)
 
 /* 88 / 114 : 10Vpp in, 5.3/4.99Vpp out */
 /* 88 / 112 : 10Vpp in, 4.7/4.4Vpp out */
