@@ -113,11 +113,6 @@ void usbd_rx_convert(int32_t* dst, size_t len){
 #endif
     }
 #endif
-  }else{
-#ifdef OWL_ACDC
-    // TODO: remove hack to prevent ACDC audio pass-through
-    memset(dst, 0, len*sizeof(int32_t));
-#endif
   }
 }
 
