@@ -37,9 +37,12 @@ static int32_t usbd_audio_rx_count = 0;
 
 /* Get number of samples transmitted since previous request */
 uint32_t usbd_audio_get_rx_count(){
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
   uint32_t samples = codec.getSampleCounter();
   uint32_t pos = usbd_audio_rx_count + samples;
   usbd_audio_rx_count = -samples; // next block will increment by a full blocksize
+  __set_PRIMASK(primask);
   return pos;
 }
 
