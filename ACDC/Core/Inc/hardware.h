@@ -5,7 +5,7 @@
 #define OWL_XIBECA
 #define HARDWARE_ID                  XIBECA_HARDWARE
 #define HARDWARE_VERSION             "AC/DC"
-#define USBD_PRODUCT_STRING_FSHS     "OWL-ACDC"
+#define USBD_PRODUCT_STRING_FSHS     "OWL-ACDC-FX"
 #define USBD_SELF_POWERED            1U
 
 /* #define NO_EXTERNAL_RAM */
@@ -61,6 +61,7 @@
 #define USE_USBD_AUDIO_FEATURES
 #define USE_USBD_AUDIO_TX           // microphone
 #define USE_USBD_AUDIO_RX           // speaker
+#define USE_USBD_AUDIO_TX_PRE_FX    // host records the raw inputs (before the patch)
 #define USE_USBD_RX_FB
 #define USE_USBD_FS
 #define USBD_AUDIO_TX_CHANNELS      4
