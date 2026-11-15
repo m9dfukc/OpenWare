@@ -116,6 +116,15 @@ SECTIONS
     _edata = .;        /* define a global symbol at data end */
   } >DTCMRAM AT> FLASH
 
+  /* AC/DC fork: code placed after everything else in flash, so that adding it
+     does not move any other code or data (see ACDC/Core/Src/ACDC.cpp onLoop) */
+  .late_text :
+  {
+    . = ALIGN(4);
+    KEEP(*(.late_text*))
+    . = ALIGN(4);
+  } >FLASH
+
   
   /* Uninitialized data section */
   . = ALIGN(4);
@@ -195,8 +204,15 @@ SECTIONS
     *(.d2data)
     PROVIDE (_HEAP_D2 = .);
   } >RAM_D2
-  _HEAP_D2_END = ORIGIN(RAM_D2) + LENGTH(RAM_D2);
+  _HEAP_D2_END = ORIGIN(RAM_D2) + LENGTH(RAM_D2) - 64; /* AC/DC fork: top 64 B for .late_bss */
   _HEAP_D2_SIZE = _HEAP_D2_END - _HEAP_D2;
+
+  /* AC/DC fork: state of .late_text code at the top of RAM_D2, not zeroed at boot */
+  .late_bss _HEAP_D2_END (NOLOAD) :
+  {
+    KEEP(*(.late_bss*))
+  } >RAM_D2
+  ASSERT(SIZEOF(.late_bss) <= 64, ".late_bss larger than the 64 B reserved at the top of RAM_D2")
 
   .heapd3 (NOLOAD) :
   {

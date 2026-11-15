@@ -9,6 +9,11 @@
 #include "flash.h"
 #include "Storage.h"
 #include "ServiceCall.h"
+#ifdef USE_USBD_AUDIO_TX_PRE_FX
+#include <string.h>
+#include "usbd_audio.h"
+#include "CircularBuffer.h"
+#endif
 
 #define XIBECA_PIN3  GPIOD, GPIO_PIN_2
 #define XIBECA_PIN4  GPIOG, GPIO_PIN_10
@@ -192,55 +197,128 @@ void onSetup(){
 }
 
 #ifdef USE_USBD_AUDIO_TX_PRE_FX
-/* While the host records (TX stream), the knobs do not affect the recording
- * (TX pre-FX) nor the outputs (RX post-FX). The input LEDs then show the raw
- * input level measured by the firmware (raw_in_levels, mean square x 4096
- * like the patch value) and turn red for 300 ms after a sample reached -0.1 dBFS.
- * Without TX stream they show the patch value (PARAMETER_AA) as before. */
+/* Input LEDs while the host records (TX stream active).
+ *
+ * The knobs then affect neither the recording (TX pre-FX) nor the outputs
+ * (RX post-FX). The input LEDs show the raw input level instead of the patch
+ * value and turn red for 300 ms after a sample reached -0.1 dBFS. Without TX
+ * stream they show the patch value (PARAMETER_AA) as before.
+ *
+ * Measured every 2 ms (MAIN_LOOP_SLEEP_MS) on the codec DMA input buffer, both
+ * halves (2 x AUDIO_BLOCK_SIZE frames, about 1/6 of the signal). Level: mean
+ * square x 4096 like the default patch, smoothed with tau = 40 ms.
+ *
+ * Memory layout: on this hardware the position of code and data in memory
+ * shifts the block synchronous noise lines (fs/8, USB SOF comb, mixing
+ * products) by up to 2 and 4.5 dB, even without any functional change. So all
+ * new code lives in .late_text (placed after everything else in flash) and its
+ * state in .late_bss (top of RAM_D2), see Hardware/xibeca.ld. onLoop() is a
+ * jump plus padding of exactly the original size, so every other symbol keeps
+ * the address it has without this feature. */
 static constexpr uint32_t ACDC_RAW_CLIP_HOLD_MS = 300;
-extern float raw_in_levels[4];
-extern volatile uint8_t raw_in_clip;
-bool usbd_audio_tx_active();
-#endif
+static constexpr float ACDC_RAW_SMOOTHING = 0.951f;      // exp(-2 ms / 40 ms)
+static constexpr int32_t ACDC_RAW_CLIP_LEVEL = 8293000;  // -0.1 dBFS of 24 bit full scale
+static constexpr uint32_t ACDC_RAW_MAGIC = 0x4c45445aU;  // .late_bss is not zeroed at boot
+extern "C" {
+  extern int32_t codec_rxbuf[];
+  extern uint16_t codec_blocksize;
+}
+// set while the host records (ProgramManager.cpp, USB TX start/stop callbacks)
+extern CircularBuffer<audio_t>* volatile usbd_tx;
 
-void onLoop(void){
-#ifdef USE_USBD_AUDIO_TX_PRE_FX
-  static uint32_t clip_tick[4];
-  static bool clip_hold[4];
-  const bool raw = usbd_audio_tx_active();
-  const uint8_t clip = raw ? __atomic_exchange_n(&raw_in_clip, 0, __ATOMIC_RELAXED) : 0;
+struct AcdcRawLedState {
+  uint32_t magic;
+  float levels[4];
+  uint32_t clip_tick[4];
+  uint8_t clip_hold[4];
+  uint8_t was_raw;
+};
+static AcdcRawLedState acdc_raw __attribute__((section(".late_bss")));
+
+__attribute__((noinline, section(".late_text")))
+static uint8_t acdcMeasureRawInputs(){
+  // SAI1 delivers 24 bit right-aligned without sign extension (SAI_DATASIZE_24)
+  const size_t frames = 2 * codec_blocksize;
+  const int32_t* src = codec_rxbuf;
+  constexpr float mul = 1.0f/0x00800000;
+  float sum[4] = {};
+  uint8_t clip = 0;
+  for(size_t i=0; i<frames; ++i){
+    for(size_t ch=0; ch<4; ++ch){
+      int32_t s = (int32_t)((uint32_t)*src++ << 8) >> 8;
+      if(s >= ACDC_RAW_CLIP_LEVEL || s <= -ACDC_RAW_CLIP_LEVEL)
+        clip |= 1<<ch;
+      float f = s * mul;
+      sum[ch] += f * f;
+    }
+  }
+  for(size_t ch=0; ch<4; ++ch)
+    acdc_raw.levels[ch] = acdc_raw.levels[ch] * ACDC_RAW_SMOOTHING + (sum[ch] / frames) * (1 - ACDC_RAW_SMOOTHING);
+  return clip;
+}
+
+__attribute__((noinline, used, section(".late_text")))
+static void acdcOnLoopLate(void){
+  const bool raw = usbd_tx != NULL;
+  if(acdc_raw.magic != ACDC_RAW_MAGIC || (raw && !acdc_raw.was_raw)){
+    memset(&acdc_raw, 0, sizeof(acdc_raw));
+    acdc_raw.magic = ACDC_RAW_MAGIC;
+  }
+  uint8_t clip = raw ? acdcMeasureRawInputs() : 0;
+  acdc_raw.was_raw = raw;
   const uint32_t now = HAL_GetTick();
-#endif
   for(size_t i=0; i<4; ++i){
-#ifdef USE_USBD_AUDIO_TX_PRE_FX
     if(raw){
       if(clip & (1<<i)){
-        clip_tick[i] = now;
-        clip_hold[i] = true;
-      }else if(clip_hold[i] && now - clip_tick[i] >= ACDC_RAW_CLIP_HOLD_MS){
-        clip_hold[i] = false;
+        acdc_raw.clip_tick[i] = now;
+        acdc_raw.clip_hold[i] = 1;
+      }else if(acdc_raw.clip_hold[i] && now - acdc_raw.clip_tick[i] >= ACDC_RAW_CLIP_HOLD_MS){
+        acdc_raw.clip_hold[i] = 0;
       }
-      if(clip_hold[i])
+      if(acdc_raw.clip_hold[i]){
         setLed(i+1, RED_COLOUR);
-      else{
-        float level = raw_in_levels[i]*4096;
+      }else{
+        float level = acdc_raw.levels[i]*4096;
         setLed(i+1, level < 4095.0f ? (uint32_t)level : 4095);
       }
     }else{
-      clip_hold[i] = false;
-#endif
-    int16_t value = getParameterValue(PARAMETER_AA+i);
-    setLed(i+1, value);
-    if(value >= ACDC_CLIPPING_LEVEL)
-      setLed(i+1, RED_COLOUR);
-#ifdef USE_USBD_AUDIO_TX_PRE_FX
+      acdc_raw.clip_hold[i] = 0;
+      int16_t value = getParameterValue(PARAMETER_AA+i);
+      setLed(i+1, value);
+      if(value >= ACDC_CLIPPING_LEVEL)
+        setLed(i+1, RED_COLOUR);
     }
-#endif
     extern float tx_levels[4];
     setLed(i+5, tx_levels[i]*4096);
     setParameterValue(PARAMETER_BA+i, tx_levels[i]*4096);
   }
 }
+
+void onLoop(void){
+  acdcOnLoopLate();
+}
+
+/* Pads the input section .text.onLoop to the size of the original onLoop()
+ * (0x1d0 B) so that all following code keeps its address. Never called. */
+#define ACDC_ONLOOP_PAD 0x1cc
+#define ACDC_STR2(x) #x
+#define ACDC_STR(x) ACDC_STR2(x)
+extern "C" __attribute__((used, naked, noinline, section(".text.onLoop"))) void acdc_onloop_pad(void){
+  __asm__ volatile(".space " ACDC_STR(ACDC_ONLOOP_PAD));
+}
+#else
+void onLoop(void){  
+  for(size_t i=0; i<4; ++i){
+    int16_t value = getParameterValue(PARAMETER_AA+i);
+    setLed(i+1, value);
+    if(value >= ACDC_CLIPPING_LEVEL)
+      setLed(i+1, RED_COLOUR);
+    extern float tx_levels[4];
+    setLed(i+5, tx_levels[i]*4096);
+    setParameterValue(PARAMETER_BA+i, tx_levels[i]*4096);
+  }
+}
+#endif
 
 #ifdef USE_FAST_POW_RESOURCES
 uint32_t fast_log_table_size = 0;
