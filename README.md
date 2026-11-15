@@ -3,7 +3,7 @@
 This branch is an unofficial firmware for the **Rebel Technology / Befaco AC/DC** Eurorack USB audio interface. It is based on OpenWare and has two goals:
 
 1. **Standalone use:** without a computer, the patch in slot 1 runs and its output reaches the jacks. A stored FX patch can be used without USB.
-2. **Normal USB interface with a computer:** the computer records the **raw inputs** (before the patch). Host playback goes to the outputs, and the USB clock no longer drifts.
+2. **Normal USB interface with a computer:** the computer records the **raw inputs** (before the patch). Host playback goes to the outputs, and the USB clock no longer drifts. While recording, the input LEDs show the raw input level.
 
 It has been built, flashed and tested on one AC/DC module with macOS (USB full speed, UAC 1.0, 4 in / 4 out, 48 kHz). It is not an official release. Use at your own risk and **back up your current firmware before flashing** (see below).
 
@@ -14,7 +14,9 @@ Discussion: [AC/DC as FX when not connected to computer (#2244)](https://communi
 | Branch | Firmware version | Content |
 |---|---|---|
 | `acdc/thru-usb-feedback` | `v22.4.r-thru1d` | Standalone pass-through + USB fixes. The computer records the patch output (stock routing) |
-| **`acdc/fx1d`** (this one) | `v22.4.r-fx1d` | as above + the computer records the raw inputs, USB product string `OWL-ACDC-FX` |
+| **`acdc/fx1d`** (this one) | `v22.4.r-fx2b` | as above + the computer records the raw inputs, USB product string `OWL-ACDC-FX`, input LEDs show the raw level while recording |
+
+The branch name is historical: `v22.4.r-fx1d` is commit `11199347` on this branch (raw inputs to USB, LEDs unchanged).
 
 ## Base: why v22.4.r and not v22.5.0
 
@@ -36,6 +38,8 @@ The base is upstream commit `db9d3dd` ("v22.4.r: MCLK=512fs", 2022-07-13) on Mar
 | `06430d10` | Version `v22.4.r-thru1d` | |
 | `f7a255cc` | **`USE_USBD_AUDIO_TX_PRE_FX`**, product string `OWL-ACDC-FX` | The computer records the inputs before the patch. See "Routing" below |
 | `11199347` | Version `v22.4.r-fx1d` | |
+| `f206fdd4` | **Input LEDs show the raw input level while the host records** | See "Input LEDs" below |
+| `6eee596c` | Version `v22.4.r-fx2b` | |
 
 ### USB feedback fix (`6753794f`)
 
@@ -63,6 +67,21 @@ The explicit feedback endpoint reported only how many samples the codec consumed
 - **Switching:** stop the host stream (deselect the device, quit the app) and the patch output returns.
 - **Names:** with `acdc/fx1d` the audio device shows up as `OWL-ACDC-FX`. Saved setups in VCV Rack or a DAW must select the device again. CoreMIDI may keep the old MIDI port name `OWL-ACDC` for a device it already knows. That is cosmetic.
 
+## Input LEDs (`f206fdd4`)
+
+Each input has a green level LED and a red clip LED. The four green output LEDs are unchanged (the firmware measures the DAC data).
+
+| Situation | Green input LED | Red input LED |
+|---|---|---|
+| No host recording (standalone, USB idle, or playback only) | value set by the patch. Default patch: mean square level **after** the knob gain | default patch: RMS above −1 dB after the knob gain |
+| Host records (USB TX stream active) | **raw input level**, mean square of the ADC data sent to USB, smoothed with τ = 4 ms. Same scale as the default patch, so at 12 o'clock (gain × 1) it looks the same | **ADC clipping:** on for 300 ms after a sample reached −0.1 dBFS |
+
+- **Why:** while the host records, the knobs change neither the recording (raw inputs) nor the outputs (host playback). With the stock LEDs, turning a knob still changed the input LEDs, which was misleading.
+- **Where:** the level is measured in `usbd_tx_convert()` on all frames, only while TX is active. Without a host stream the firmware does exactly the same work as before.
+- **Scale:** mean square is an audio-style display. A DC control voltage looks dim: 1 V ≈ 1 %, 5 V ≈ 28 % brightness (input full scale ≈ ±9.5 V measured on the loop-back, spec ±10 V).
+- **Clipping:** the ADC reaches full scale at about ±9.5–10 V. Signals up to the ±12 V rails are safe, but recordings above ≈ 10 V are clipped, and that is what the red LED shows while recording.
+- **Note:** SAI1 delivers the 24-bit samples right-aligned **without sign extension**. They are sign-extended before measuring. A first build without this (`v22.4.r-fx2`, not committed) showed the red LEDs permanently on while recording.
+
 ## Build
 
 Requirements: Arm GNU Toolchain **12.2.Rel1** (`arm-none-eabi-gcc 12.2.1 20221205`) and GNU Make.
@@ -75,7 +94,7 @@ make -C ACDC CONFIG=Release TOOLROOT=/path/to/arm-gnu-toolchain/bin/ all
 # result: ACDC/Build/ACDC.bin (≈ 106 KB, must stay below 128 KB internal flash)
 ```
 
-The tested binary (`v22.4.r-fx1d`, 105 968 bytes, SHA-256 `7f9f9a34b5b19a0245f0ab15426d891adc4f00505c86236cadec167e0402925b`) was built from `db9d3dd` plus the same changes applied as patch files.
+The tested binary (`v22.4.r-fx2b`, 106 332 bytes, SHA-256 `cfa479f30c3bd71bd9ff5515f0208f59fcd0cf28dad0114d8dba2200a9f9cabb`) was built from `db9d3dd` plus the same changes applied as patch files. The previous one (`v22.4.r-fx1d`, 105 968 bytes, SHA-256 `7f9f9a34b5b19a0245f0ab15426d891adc4f00505c86236cadec167e0402925b`) is the state at `11199347`.
 
 - The code is identical to this branch, only some comments differ.
 - `GIT_REVISION` is embedded in the binary. A build from the branch therefore has a different SHA.
@@ -99,6 +118,13 @@ The tested binary (`v22.4.r-fx1d`, 105 968 bytes, SHA-256 `7f9f9a34b5b19a0245f0a
 4. **Leave DFU with a full power cycle:** case power off **and** USB unplugged, then case on, then USB.
 
 Patches stored in QSPI flash and the device settings are not touched by flashing the internal flash. On the tested module, slots and storage were identical before and after.
+
+## Test status of `v22.4.r-fx2b`
+
+- Flashed and read back, version, slots and storage unchanged after flashing.
+- Pass-through without USB and with USB but no stream: works, input LEDs follow the knobs as before.
+- While recording: input LEDs follow the raw input, knobs have no effect on them.
+- **Not yet verified:** the red clip LED with a signal above full scale, and a repeat of the noise and loop-back measurements below with this version. The measurements below were made with `v22.4.r-fx1d`.
 
 ## Measurements (one module, macOS, Eurorack case)
 
