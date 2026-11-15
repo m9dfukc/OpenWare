@@ -14,7 +14,7 @@ Discussion: [AC/DC as FX when not connected to computer (#2244)](https://communi
 | Branch | Firmware version | Content |
 |---|---|---|
 | `acdc/thru-usb-feedback` | `v22.4.r-thru1d` | Standalone pass-through + USB fixes. The computer records the patch output (stock routing) |
-| **`acdc/fx1d`** (this one) | `v22.4.r-fx2b` | as above + the computer records the raw inputs, USB product string `OWL-ACDC-FX`, input LEDs show the raw level while recording |
+| **`acdc/fx1d`** (this one) | `v22.4.r-fx2d` | as above + the computer records the raw inputs, USB product string `OWL-ACDC-FX`, input LEDs show the raw level while recording |
 
 The branch name is historical: `v22.4.r-fx1d` is commit `11199347` on this branch (raw inputs to USB, LEDs unchanged).
 
@@ -38,8 +38,10 @@ The base is upstream commit `db9d3dd` ("v22.4.r: MCLK=512fs", 2022-07-13) on Mar
 | `06430d10` | Version `v22.4.r-thru1d` | |
 | `f7a255cc` | **`USE_USBD_AUDIO_TX_PRE_FX`**, product string `OWL-ACDC-FX` | The computer records the inputs before the patch. See "Routing" below |
 | `11199347` | Version `v22.4.r-fx1d` | |
-| `f206fdd4` | **Input LEDs show the raw input level while the host records** | See "Input LEDs" below |
+| `f206fdd4` | Input LEDs show the raw input level while the host records (first version, measured in `usbd_tx_convert`) | Superseded by `6d3b8bd5`, see "Memory layout matters" below |
 | `6eee596c` | Version `v22.4.r-fx2b` | |
+| `6d3b8bd5` | **Raw input LEDs without moving any other code or data** | See "Input LEDs" and "Memory layout matters" below |
+| `cc2e08f8` | Version `v22.4.r-fx2d` | |
 
 ### USB feedback fix (`6753794f`)
 
@@ -67,17 +69,18 @@ The explicit feedback endpoint reported only how many samples the codec consumed
 - **Switching:** stop the host stream (deselect the device, quit the app) and the patch output returns.
 - **Names:** with `acdc/fx1d` the audio device shows up as `OWL-ACDC-FX`. Saved setups in VCV Rack or a DAW must select the device again. CoreMIDI may keep the old MIDI port name `OWL-ACDC` for a device it already knows. That is cosmetic.
 
-## Input LEDs (`f206fdd4`)
+## Input LEDs (`6d3b8bd5`)
 
 Each input has a green level LED and a red clip LED. The four green output LEDs are unchanged (the firmware measures the DAC data).
 
 | Situation | Green input LED | Red input LED |
 |---|---|---|
 | No host recording (standalone, USB idle, or playback only) | value set by the patch. Default patch: mean square level **after** the knob gain | default patch: RMS above −1 dB after the knob gain |
-| Host records (USB TX stream active) | **raw input level**, mean square of the ADC data sent to USB, smoothed with τ = 4 ms. Same scale as the default patch, so at 12 o'clock (gain × 1) it looks the same | **ADC clipping:** on for 300 ms after a sample reached −0.1 dBFS |
+| Host records (USB TX stream active) | **raw input level**, mean square of the ADC data, smoothed with τ = 40 ms. Same scale as the default patch, so at 12 o'clock (gain × 1) it looks the same | **ADC clipping:** on for 300 ms after a sample reached −0.1 dBFS |
 
 - **Why:** while the host records, the knobs change neither the recording (raw inputs) nor the outputs (host playback). With the stock LEDs, turning a knob still changed the input LEDs, which was misleading.
-- **Where:** the level is measured in `usbd_tx_convert()` on all frames, only while TX is active. Without a host stream the firmware does exactly the same work as before.
+- **Where:** `onLoop()` (every 2 ms) reads the codec DMA input buffer (both halves, 16 frames, about 1/6 of the signal), only while TX is active. Nothing in the audio path changes. The level is right on average; a single clip shorter than ≈ 2 ms can be missed, sustained clipping is caught.
+- **Memory layout:** the new code is in `.late_text` (after everything else in flash), its state in `.late_bss` (top 64 B of RAM_D2, see `Hardware/xibeca.ld`). `onLoop()` is a jump padded to its original size. The binary is byte identical to `v22.4.r-fx1d` except for `onLoop`, one character of the version string and the value of `_HEAP_D2_SIZE` (64 B smaller); the new code is appended. Why: see "Memory layout matters" below.
 - **Scale:** mean square is an audio-style display. A DC control voltage looks dim: 1 V ≈ 1 %, 5 V ≈ 28 % brightness (input full scale ≈ ±9.5 V measured on the loop-back, spec ±10 V).
 - **Clipping:** the ADC reaches full scale at about ±9.5–10 V. Signals up to the ±12 V rails are safe, but recordings above ≈ 10 V are clipped, and that is what the red LED shows while recording.
 - **Note:** SAI1 delivers the 24-bit samples right-aligned **without sign extension**. They are sign-extended before measuring. A first build without this (`v22.4.r-fx2`, not committed) showed the red LEDs permanently on while recording.
@@ -94,7 +97,7 @@ make -C ACDC CONFIG=Release TOOLROOT=/path/to/arm-gnu-toolchain/bin/ all
 # result: ACDC/Build/ACDC.bin (≈ 106 KB, must stay below 128 KB internal flash)
 ```
 
-The tested binary (`v22.4.r-fx2b`, 106 332 bytes, SHA-256 `cfa479f30c3bd71bd9ff5515f0208f59fcd0cf28dad0114d8dba2200a9f9cabb`) was built from `db9d3dd` plus the same changes applied as patch files. The previous one (`v22.4.r-fx1d`, 105 968 bytes, SHA-256 `7f9f9a34b5b19a0245f0ab15426d891adc4f00505c86236cadec167e0402925b`) is the state at `11199347`.
+The tested binary (`v22.4.r-fx2d`, 106 788 bytes, SHA-256 `d212cf8def6f239db997cd45a73304db9bcaf981375e55fdfc2ca2862718832a`) was built from `db9d3dd` plus the same changes applied as patch files. The previous one (`v22.4.r-fx1d`, 105 968 bytes, SHA-256 `7f9f9a34b5b19a0245f0ab15426d891adc4f00505c86236cadec167e0402925b`) is the state at `11199347`.
 
 - The code is identical to this branch, only some comments differ.
 - `GIT_REVISION` is embedded in the binary. A build from the branch therefore has a different SHA.
@@ -119,27 +122,35 @@ The tested binary (`v22.4.r-fx2b`, 106 332 bytes, SHA-256 `cfa479f30c3bd71bd9ff5
 
 Patches stored in QSPI flash and the device settings are not touched by flashing the internal flash. On the tested module, slots and storage were identical before and after.
 
-## Test status of `v22.4.r-fx2b`
+## Test status of `v22.4.r-fx2d`
 
 - Flashed and read back, version, slots and storage unchanged after flashing.
-- Pass-through without USB and with USB but no stream: works, input LEDs follow the knobs as before.
-- While recording: input LEDs follow the raw input, knobs have no effect on them.
+- Input LEDs: without a host stream they follow the knobs as before; while recording they follow the raw input and the knobs have no effect on them.
 - **Not yet verified:** the red clip LED with a signal above full scale.
-- **Noise (open inputs, 2 × 60 s each, same session, compared with `v22.4.r-fx1d` flashed back as a control):**
+- **Noise** (open inputs, 2 × 60 s each, compared with `v22.4.r-fx1d` flashed back as a control in the same session):
 
-  | Measure | `v22.4.r-fx2b` − `v22.4.r-fx1d` |
+  | Measure | `v22.4.r-fx2d` − `v22.4.r-fx1d` |
   |---|---|
-  | fs/8 line at 6000 Hz | **+1.4 dB** |
-  | 1 kHz comb (sum) | **+1.5 dB** |
-  | Mixing products n · f_SOF + m · 6000 Hz | −4.0 dB |
-  | Broadband floor without lines | −0.4 dB |
-  | RMS ≥ 20 Hz | +0.8 dB |
+  | fs/8 line at 6000 Hz | +0.05 dB |
+  | Mixing products n · f_SOF + m · 6000 Hz | +0.03 dB |
+  | Broadband floor without lines | −0.2 dB |
+  | 1 kHz comb (sum) | +0.4 … +0.55 dB (rose by 0.26 dB between the two runs, session drift not excluded) |
+  | RMS ≥ 20 Hz | +0.2 dB |
 
-  Repeat runs agree within 0.2 dB, and the control matches the earlier `v22.4.r-fx1d` baseline within 0.2 dB, so the shift comes from the firmware change. About 32 extra multiply-adds per block in the audio task are enough to move the block-synchronous noise lines, in both directions.
-- **Recommendation:** for the lowest line level in recordings use `v22.4.r-fx1d` (commit `11199347`). Use `v22.4.r-fx2b` if the input LEDs matter more than ≈ 1.5 dB on the fs/8 line and the comb. A lighter variant is being tried.
-- The measurements below were made with `v22.4.r-fx1d`.
+## Memory layout matters
+
+The first two attempts at the raw input LEDs (`v22.4.r-fx2b`: measurement in `usbd_tx_convert`, and an unreleased variant measuring in `onLoop`) both raised the fs/8 line by 1.4–2.0 dB and the comb by 1.5 dB, and lowered the mixing products by 4.0–4.4 dB. A test build that is functionally identical to `v22.4.r-fx1d` but has 0x150 bytes of unused padding before the audio functions (and 0x28 bytes in RAM) reproduced this within 0.12 dB.
+
+So on this module the **position of code and data in memory** changes the block-synchronous noise lines, without any functional change. The likely mechanism is a different CPU timing pattern within each audio block (flash wait states, prefetch, cache lines), coupling into the ADC through supply and ground. This is not verified.
+
+Consequences:
+- Any firmware change can move these lines by a few dB, even if it only touches code outside the audio path. Comparisons between builds measure the code **and** its layout.
+- `v22.4.r-fx2d` therefore keeps every existing address and only appends code.
+- The layout could be used deliberately: different paddings might lower the lines below the current state. Not tried yet.
 
 ## Measurements (one module, macOS, Eurorack case)
+
+Measured with `v22.4.r-fx1d`. `v22.4.r-fx2d` matches it within the table in "Test status" above.
 
 Levels are in dBFS of the USB stream (16 bit), inputs open, gain knob at 12 o'clock.
 
@@ -157,7 +168,7 @@ Levels are in dBFS of the USB stream (16 bit), inputs open, gain knob at 12 o'cl
 
   The discrete lines make up about 70 % of the noise power. An ideal notch bank would gain ≈ 5.5 dB.
 - **Compared with stock routing:** Once the patch gain is accounted for, the noise of `acdc/fx1d` equals `acdc/thru-usb-feedback` within ±0.2 dB. Two recordings in a row agree within 0.1 dB.
-- **Known side effect:** Since the feedback fix, the mixing products are ≈ 4.8 dB higher than before (reproducible, still about 4–7 % of the noise). The likely cause is the extra work in the USB interrupt.
+- **Known side effect:** Since the feedback fix, the mixing products are ≈ 4.8 dB higher than before (reproducible, still about 4–7 % of the noise). Given "Memory layout matters" above, the cause may be the changed code layout rather than the extra work in the USB interrupt.
 - **Ground loops:** A loop appeared only in a measurement setup where the AC/DC was on a computer port and an audio interface fed from its outputs was on a hub. With both devices on the same hub it was gone. No USB isolator was needed.
 - **Not addressed:**
   - the 1 kHz comb in recordings (it is in the ADC data while USB is active)
