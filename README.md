@@ -124,7 +124,20 @@ Patches stored in QSPI flash and the device settings are not touched by flashing
 - Flashed and read back, version, slots and storage unchanged after flashing.
 - Pass-through without USB and with USB but no stream: works, input LEDs follow the knobs as before.
 - While recording: input LEDs follow the raw input, knobs have no effect on them.
-- **Not yet verified:** the red clip LED with a signal above full scale, and a repeat of the noise and loop-back measurements below with this version. The measurements below were made with `v22.4.r-fx1d`.
+- **Not yet verified:** the red clip LED with a signal above full scale.
+- **Noise (open inputs, 2 × 60 s each, same session, compared with `v22.4.r-fx1d` flashed back as a control):**
+
+  | Measure | `v22.4.r-fx2b` − `v22.4.r-fx1d` |
+  |---|---|
+  | fs/8 line at 6000 Hz | **+1.4 dB** |
+  | 1 kHz comb (sum) | **+1.5 dB** |
+  | Mixing products n · f_SOF + m · 6000 Hz | −4.0 dB |
+  | Broadband floor without lines | −0.4 dB |
+  | RMS ≥ 20 Hz | +0.8 dB |
+
+  Repeat runs agree within 0.2 dB, and the control matches the earlier `v22.4.r-fx1d` baseline within 0.2 dB, so the shift comes from the firmware change. About 32 extra multiply-adds per block in the audio task are enough to move the block-synchronous noise lines, in both directions.
+- **Recommendation:** for the lowest line level in recordings use `v22.4.r-fx1d` (commit `11199347`). Use `v22.4.r-fx2b` if the input LEDs matter more than ≈ 1.5 dB on the fs/8 line and the comb. A lighter variant is being tried.
+- The measurements below were made with `v22.4.r-fx1d`.
 
 ## Measurements (one module, macOS, Eurorack case)
 
