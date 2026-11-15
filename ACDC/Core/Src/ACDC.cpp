@@ -191,12 +191,51 @@ void onSetup(){
   led_in1.afMode();
 }
 
-void onLoop(void){  
+#ifdef USE_USBD_AUDIO_TX_PRE_FX
+/* While the host records (TX stream), the knobs do not affect the recording
+ * (TX pre-FX) nor the outputs (RX post-FX). The input LEDs then show the raw
+ * input level measured by the firmware (raw_in_levels, mean square x 4096
+ * like the patch value) and turn red for 300 ms after a sample reached -0.1 dBFS.
+ * Without TX stream they show the patch value (PARAMETER_AA) as before. */
+static constexpr uint32_t ACDC_RAW_CLIP_HOLD_MS = 300;
+extern float raw_in_levels[4];
+extern volatile uint8_t raw_in_clip;
+bool usbd_audio_tx_active();
+#endif
+
+void onLoop(void){
+#ifdef USE_USBD_AUDIO_TX_PRE_FX
+  static uint32_t clip_tick[4];
+  static bool clip_hold[4];
+  const bool raw = usbd_audio_tx_active();
+  const uint8_t clip = raw ? __atomic_exchange_n(&raw_in_clip, 0, __ATOMIC_RELAXED) : 0;
+  const uint32_t now = HAL_GetTick();
+#endif
   for(size_t i=0; i<4; ++i){
+#ifdef USE_USBD_AUDIO_TX_PRE_FX
+    if(raw){
+      if(clip & (1<<i)){
+        clip_tick[i] = now;
+        clip_hold[i] = true;
+      }else if(clip_hold[i] && now - clip_tick[i] >= ACDC_RAW_CLIP_HOLD_MS){
+        clip_hold[i] = false;
+      }
+      if(clip_hold[i])
+        setLed(i+1, RED_COLOUR);
+      else{
+        float level = raw_in_levels[i]*4096;
+        setLed(i+1, level < 4095.0f ? (uint32_t)level : 4095);
+      }
+    }else{
+      clip_hold[i] = false;
+#endif
     int16_t value = getParameterValue(PARAMETER_AA+i);
     setLed(i+1, value);
     if(value >= ACDC_CLIPPING_LEVEL)
       setLed(i+1, RED_COLOUR);
+#ifdef USE_USBD_AUDIO_TX_PRE_FX
+    }
+#endif
     extern float tx_levels[4];
     setLed(i+5, tx_levels[i]*4096);
     setParameterValue(PARAMETER_BA+i, tx_levels[i]*4096);

@@ -46,7 +46,52 @@ uint32_t usbd_audio_get_rx_count(){
   return pos;
 }
 
+#ifdef USE_USBD_AUDIO_TX_PRE_FX
+/* Raw input levels (ADC data as sent to USB), measured only while the host
+ * records (TX stream active). Shown on the input LEDs by onLoop() instead of
+ * the patch value, see ACDC/Core/Src/ACDC.cpp.
+ * raw_in_levels: mean square per block (full scale = 1.0), exponentially
+ * smoothed per block, tau = 4 ms at 6 kHz block rate (48 kHz / AUDIO_BLOCK_SIZE 8).
+ * raw_in_clip: one bit per channel, set when a sample reaches -0.1 dBFS
+ * (24 bit full scale 8388607), cleared by onLoop(). */
+float raw_in_levels[AUDIO_CHANNELS];
+volatile uint8_t raw_in_clip = 0;
+static constexpr float RAW_IN_SMOOTHING = 0.9592f; // exp(-1/(6000 * 0.004))
+static constexpr int32_t RAW_IN_CLIP_LEVEL = 8293000; // -0.1 dBFS
+
+bool usbd_audio_tx_active(){
+  return usbd_tx != NULL;
+}
+
+static void raw_in_levels_update(const int32_t* src, size_t len){
+  constexpr float mul = 1.0f/0x00800000;
+  float sum[AUDIO_CHANNELS] = {};
+  uint8_t clip = 0;
+  const size_t frames = len / AUDIO_CHANNELS;
+  if(frames == 0)
+    return;
+  for(size_t i=0; i<frames; ++i){
+    for(size_t ch=0; ch<AUDIO_CHANNELS; ++ch){
+      // SAI1 delivers 24 bit right-aligned without sign extension (SAI_DATASIZE_24)
+      int32_t s = (int32_t)((uint32_t)*src++ << 8) >> 8;
+      if(s >= RAW_IN_CLIP_LEVEL || s <= -RAW_IN_CLIP_LEVEL)
+        clip |= 1<<ch;
+      float f = s * mul;
+      sum[ch] += f * f;
+    }
+  }
+  for(size_t ch=0; ch<AUDIO_CHANNELS; ++ch)
+    raw_in_levels[ch] = raw_in_levels[ch] * RAW_IN_SMOOTHING + (sum[ch] / frames) * (1 - RAW_IN_SMOOTHING);
+  if(clip)
+    __atomic_fetch_or(&raw_in_clip, clip, __ATOMIC_RELAXED);
+}
+#endif /* USE_USBD_AUDIO_TX_PRE_FX */
+
 void usbd_audio_tx_start_callback(size_t rate, uint8_t channels, void* cb){
+#ifdef USE_USBD_AUDIO_TX_PRE_FX
+  memset(raw_in_levels, 0, sizeof(raw_in_levels));
+  raw_in_clip = 0;
+#endif
   usbd_tx = (CircularBuffer<audio_t>*)cb;
 #ifdef DEBUG
   printf("start tx %u %u %u\n", rate, channels, usbd_tx->getSize());
@@ -55,6 +100,10 @@ void usbd_audio_tx_start_callback(size_t rate, uint8_t channels, void* cb){
 
 void usbd_audio_tx_stop_callback(){
   usbd_tx = NULL;
+#ifdef USE_USBD_AUDIO_TX_PRE_FX
+  memset(raw_in_levels, 0, sizeof(raw_in_levels));
+  raw_in_clip = 0;
+#endif
 #ifdef DEBUG
   printf("stop tx\n");
 #endif
@@ -122,6 +171,9 @@ void usbd_rx_convert(int32_t* dst, size_t len){
 void usbd_tx_convert(int32_t* src, size_t len){
   CircularBuffer<audio_t>* tx = usbd_tx;
   if(tx){
+#ifdef USE_USBD_AUDIO_TX_PRE_FX
+    raw_in_levels_update(src, len); // raw input levels for the input LEDs
+#endif
     size_t cap = tx->getWriteCapacity();
     if(cap < len){
       // tx buffer overflow
