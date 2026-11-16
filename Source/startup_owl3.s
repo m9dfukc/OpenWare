@@ -100,6 +100,40 @@ LoopFillZerobss:
   cmp  r2, r3
   bcc  FillZerobss
 
+/* AC/DC fork: copy the vector table and the hot path (.itcm_text) from flash
+   into ITCM, then point VTOR at the copy. ITCM has 64 bit ECC, so both copies
+   write whole 64 bit words (start, end and source are 8 byte aligned, see
+   Hardware/xibeca.ld). Nothing in ITCM may run before this point. */
+  ldr  r0, =_ISR_VECTOR
+  ldr  r1, =_sitcm_vect
+  ldr  r2, =_eitcm_vect
+  b  LoopCopyItcmVect
+CopyItcmVect:
+  ldrd  r3, r12, [r0], #8
+  strd  r3, r12, [r1], #8
+LoopCopyItcmVect:
+  cmp  r1, r2
+  bcc  CopyItcmVect
+
+  ldr  r0, =_litcm_text
+  ldr  r1, =_sitcm_text
+  ldr  r2, =_eitcm_text
+  b  LoopCopyItcmText
+CopyItcmText:
+  ldrd  r3, r12, [r0], #8
+  strd  r3, r12, [r1], #8
+LoopCopyItcmText:
+  cmp  r1, r2
+  bcc  CopyItcmText
+  dsb
+  isb
+
+  ldr  r0, =0xE000ED08     /* SCB->VTOR */
+  ldr  r1, =_sitcm_vect
+  str  r1, [r0]
+  dsb
+  isb
+
 /* Call static constructors */
     bl __libc_init_array
 /* Call the application's entry point.*/
