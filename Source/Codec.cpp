@@ -236,11 +236,29 @@ extern "C" {
     audioCallback(codec_rxbuf+codec_blocksize*AUDIO_CHANNELS, codec_txbuf+codec_blocksize*AUDIO_CHANNELS, codec_blocksize);
   }
 #else // PCM3168A: TX is slave
-  void HAL_SAI_TxHalfCpltCallback(SAI_HandleTypeDef *hsai){
+  /* AC/DC fork, Patch 12b (acdc project messlog D40/D42): release the audio block from
+     the RX DMA interrupt (SAI1 block A, DMA1_Stream0), as in the CS4271 branch above.
+     The TX DMA (SAI1 block B) runs ahead of the RX DMA: when the TX half/complete
+     interrupt fires, the last RX word of the half is often not written yet, and a fast
+     audio task (code in ITCM) read the stale value from the previous buffer cycle
+     (16 frames old, last sample of each block = channel 4). When the RX interrupt fires,
+     the RX half is complete. The TX half handed out is the one the TX DMA has just
+     finished (it is at most its FIFO depth into the other half), so the task still has
+     almost a full block to write it. No polling (Patch 12 raised fs/8 by ~10 dB).
+     codec.getSampleCounter() still reads the TX NDTR; the block now starts about one
+     word later relative to it. */
+  void HAL_SAI_RxHalfCpltCallback(SAI_HandleTypeDef *hsai){
     audioCallback(codec_rxbuf, codec_txbuf, codec_blocksize);
   }
-  void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai){
+  void HAL_SAI_RxCpltCallback(SAI_HandleTypeDef *hsai){
     audioCallback(codec_rxbuf+codec_blocksize*AUDIO_CHANNELS, codec_txbuf+codec_blocksize*AUDIO_CHANNELS, codec_blocksize);
+  }
+  /* Kept as strong, empty definitions in Codec.o: the ITCM linker rules (Patch 11*) place
+     them by object file, so the TX DMA interrupt does not call the weak HAL version in
+     flash through a veneer. */
+  void HAL_SAI_TxHalfCpltCallback(SAI_HandleTypeDef *hsai){
+  }
+  void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai){
   }
 #endif
   void HAL_SAI_ErrorCallback(SAI_HandleTypeDef *hsai){
