@@ -56,7 +56,7 @@ The explicit feedback endpoint reported only how many samples the codec consumed
 | Computer streams playback | **host playback** (overwrites the patch output) | – |
 | Computer records | host playback, see note | **patch output**, including the digital gain of the default patch |
 
-- **Note on recording:** macOS also starts the playback stream when an app only *records* from the AC/DC, for example Audacity. VCV Rack always opens the device in both directions. While recording, the outputs therefore carry the host playback (silence if nothing is played), not the patch.
+- **Note on recording:** macOS also starts the playback stream when an app only *records* from the AC/DC. Some host software always opens the device in both directions. While recording, the outputs therefore carry the host playback (silence if nothing is played), not the patch.
 - **Switching:** stop the host stream (deselect the device, quit the app) and the patch output returns.
 - **Gain knob:** with the default patch "ACDC" each knob is a digital gain, (2 · knob)², about ×1 at 12 o'clock. It also scales the USB recording, including the noise. At 0 the recording is digitally silent.
 - **Name:** the USB product string stays `OWL-ACDC`, so existing setups keep working.
