@@ -71,9 +71,9 @@ The explicit feedback endpoint reported only how many samples the codec consumed
 | Computer records (`acdc/fx1d`) | host playback, see note | **raw inputs**, before the patch and its digital gain |
 | Computer records (`acdc/thru-usb-feedback`, stock) | host playback | patch output |
 
-- **Note on recording:** macOS also starts the playback stream when an app only *records* from the AC/DC, for example Audacity. VCV Rack always opens the device in both directions. While recording, the outputs therefore carry the host playback (silence if nothing is played), not the patch.
+- **Note on recording:** macOS also starts the playback stream when an app only *records* from the AC/DC. Some host software always opens the device in both directions. While recording, the outputs therefore carry the host playback (silence if nothing is played), not the patch.
 - **Switching:** stop the host stream (deselect the device, quit the app) and the patch output returns.
-- **Names:** with `acdc/fx1d` the audio device shows up as `OWL-ACDC-FX`. Saved setups in VCV Rack or a DAW must select the device again. CoreMIDI may keep the old MIDI port name `OWL-ACDC` for a device it already knows. That is cosmetic.
+- **Names:** with `acdc/fx1d` the audio device shows up as `OWL-ACDC-FX`. Saved setups in host software must select the device again. CoreMIDI may keep the old MIDI port name `OWL-ACDC` for a device it already knows. That is cosmetic.
 
 ## ITCM hot path (`v22.4.r-fx3l`)
 
