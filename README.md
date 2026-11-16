@@ -4,6 +4,7 @@ This branch is an unofficial firmware for the **Rebel Technology / Befaco AC/DC*
 
 1. **Standalone use:** without a computer, the patch in slot 1 runs and its output reaches the jacks. A stored FX patch can be used without USB.
 2. **Normal USB interface with a computer:** the computer records the **raw inputs** (before the patch). Host playback goes to the outputs, and the USB clock no longer drifts. While recording, the input LEDs show the raw input level.
+3. **Less noise:** the periodic code runs from ITCM. This lowers the fs/8 line by about 5 dB and removes the mixing products, see "ITCM hot path" below.
 
 It has been built, flashed and tested on one AC/DC module with macOS (USB full speed, UAC 1.0, 4 in / 4 out, 48 kHz). It is not an official release. Use at your own risk and **back up your current firmware before flashing** (see below).
 
@@ -14,9 +15,9 @@ Discussion: [AC/DC as FX when not connected to computer (#2244)](https://communi
 | Branch | Firmware version | Content |
 |---|---|---|
 | `acdc/thru-usb-feedback` | `v22.4.r-thru1d` | Standalone pass-through + USB fixes. The computer records the patch output (stock routing) |
-| **`acdc/fx1d`** (this one) | `v22.4.r-fx2d` | as above + the computer records the raw inputs, USB product string `OWL-ACDC-FX`, input LEDs show the raw level while recording |
+| **`acdc/fx1d`** (this one) | `v22.4.r-fx3l` | as above + the computer records the raw inputs, USB product string `OWL-ACDC-FX`, input LEDs show the raw level while recording, hot path in ITCM |
 
-The branch name is historical: `v22.4.r-fx1d` is commit `11199347` on this branch (raw inputs to USB, LEDs unchanged).
+The branch name is historical: `v22.4.r-fx1d` is commit `11199347` on this branch (raw inputs to USB, LEDs unchanged), `v22.4.r-fx2d` is `abc3a72a` (raw input LEDs, code in flash).
 
 ## Base: why v22.4.r and not v22.5.0
 
@@ -42,6 +43,11 @@ The base is upstream commit `db9d3dd` ("v22.4.r: MCLK=512fs", 2022-07-13) on Mar
 | `6eee596c` | Version `v22.4.r-fx2b` | |
 | `6d3b8bd5` | **Raw input LEDs without moving any other code or data** | See "Input LEDs" and "Memory layout matters" below |
 | `cc2e08f8` | Version `v22.4.r-fx2d` | |
+| `151bd8bc` | **Build with GCC 13+** (cherry-pick of upstream `d5b6409a`) | Compiler flags only. With GCC 12.2 the binary does not change |
+| `2ae8b836` | **Start the audio block from the RX DMA interrupt** | Fixes stale input samples with a fast audio task, see "ITCM hot path" below |
+| `0b7122de` | **Run the periodic hot path from ITCM** | See "ITCM hot path" below |
+| `fb2c6ed9` | **USB audio: evaluate SOF only once per frame** | Fixes wrong feedback with the USB handler in ITCM, see "ITCM hot path" below |
+| `5cb2c17c` | Version `v22.4.r-fx3l` | |
 
 ### USB feedback fix (`6753794f`)
 
@@ -68,6 +74,40 @@ The explicit feedback endpoint reported only how many samples the codec consumed
 - **Note on recording:** macOS also starts the playback stream when an app only *records* from the AC/DC, for example Audacity. VCV Rack always opens the device in both directions. While recording, the outputs therefore carry the host playback (silence if nothing is played), not the patch.
 - **Switching:** stop the host stream (deselect the device, quit the app) and the patch output returns.
 - **Names:** with `acdc/fx1d` the audio device shows up as `OWL-ACDC-FX`. Saved setups in VCV Rack or a DAW must select the device again. CoreMIDI may keep the old MIDI port name `OWL-ACDC` for a device it already knows. That is cosmetic.
+
+## ITCM hot path (`v22.4.r-fx3l`)
+
+Since the noise lines depend on where code sits in flash (see "Memory layout matters"), everything that runs periodically now runs from ITCM (zero wait state RAM at `0x3000`, part of CCMRAM), together with a copy of the vector table. This covers:
+- the SAI DMA interrupts and `audioCallback`
+- the FreeRTOS scheduler, idle task and SysTick
+- the audio task (USB conversion, parameters, MIDI)
+- the USB OTG interrupt, USB device core, audio class and feedback
+- the ADC DMA, main loop and `onLoop` LED code
+
+`Reset_Handler` copies vectors and code before anything else runs. Calls from ITCM back into flash go through linker veneers, and all of them are on error or rare event paths. The patch heap in CCMRAM shrinks from 52 KB to **39.3 KB**.
+
+Moving code to ITCM exposed two timing bugs:
+
+1. **Stale input sample:** the audio block was released by the TX DMA interrupt, but the RX DMA lags behind. With the faster audio task, the last input sample of every block (channel 4) was 16 frames old in 94–96 % of all blocks. Now the block starts from the RX DMA interrupt (`2ae8b836`).
+   - A first fix that polled the RX DMA counter instead raised the fs/8 line by about 10 dB. A few µs of extra bus activity per block are enough.
+2. **Double SOF:** with the USB handler in ITCM, the SOF callback ran twice in about 97 % of all frames, with the same frame number. The feedback period then covered only half the time. The host received wrong feedback (47.5–48.5 instead of ≈ 48.0), the RX buffer hit its limits and samples slipped. No ISO packet was lost.
+   - Presumably the handler re-enters before the cleared `GINTSTS.SOF` flag takes effect in the USB clock domain.
+   - Now each frame number is evaluated once (`fb2c6ed9`).
+
+Results (one module, open inputs, gain at 12 o'clock, 2 × 60 s each, compared with `v22.4.r-fx2d` flashed back as a control; levels in dBFS of the USB stream):
+
+| Measure | `v22.4.r-fx2d` | `v22.4.r-fx3l` | Difference |
+|---|---|---|---|
+| RMS ≥ 20 Hz | −77.6 | −78.7 | **−1.1 dB** |
+| Broadband floor without lines | −83.2 | −84.5 | **−1.3 dB** |
+| 1 kHz comb (sum) | −80.9 | −80.6 | +0.2 … +0.4 dB |
+| fs/8 line at 6000 Hz | −84.3 | −89.4 | **−5.1 dB** |
+| Mixing products n · f_SOF + m · 6000 Hz | −90.8 | ≈ −125 | **≈ −35 dB** (gone) |
+
+- **Loop-back test** (sines out → in, 60 s): no sample slips, no stale samples, no feedback clamping.
+- **Layout independent:** a build with 0x150 bytes of padding in flash (ITCM content byte identical) is within 0.25 dB in all measures.
+- With the USB code in flash and everything else in ITCM, the comb was 3.5 dB higher than with `v22.4.r-fx2d`. The comb needs the USB code in ITCM.
+- **In daily use since 2026-11-16 on the tested module.** Not yet checked: patches that need more than 39.3 KB of heap.
 
 ## Input LEDs (`6d3b8bd5`)
 
@@ -97,10 +137,10 @@ make -C ACDC CONFIG=Release TOOLROOT=/path/to/arm-gnu-toolchain/bin/ all
 # result: ACDC/Build/ACDC.bin (≈ 106 KB, must stay below 128 KB internal flash)
 ```
 
-The tested binary (`v22.4.r-fx2d`, 106 788 bytes, SHA-256 `d212cf8def6f239db997cd45a73304db9bcaf981375e55fdfc2ca2862718832a`) was built from `db9d3dd` plus the same changes applied as patch files. The previous one (`v22.4.r-fx1d`, 105 968 bytes, SHA-256 `7f9f9a34b5b19a0245f0ab15426d891adc4f00505c86236cadec167e0402925b`) is the state at `11199347`.
-
-- The code is identical to this branch, only some comments differ.
-- `GIT_REVISION` is embedded in the binary. A build from the branch therefore has a different SHA.
+The tested binary is `v22.4.r-fx3l`: 107 340 bytes, SHA-256 `b55b94d8734baf1cf763dfefb380a561029bd00d4a645cdcef3b75d99e6f010e`.
+- A build of this branch with Arm GNU Toolchain 12.2.Rel1 and `CONFIG=Release` is byte identical to it.
+- Earlier tested binaries: `v22.4.r-fx2d` (state at `abc3a72a`, 106 788 bytes, SHA-256 `d212cf8def6f239db997cd45a73304db9bcaf981375e55fdfc2ca2862718832a`) and `v22.4.r-fx1d` (state at `11199347`, 105 968 bytes, SHA-256 `7f9f9a34b5b19a0245f0ab15426d891adc4f00505c86236cadec167e0402925b`).
+- These two were built from `db9d3dd` plus the same changes as patch files. Their code matches the branch, only some comments differ.
 
 ## Flash (ST ROM DFU, front USB-B jack)
 
@@ -122,11 +162,14 @@ The tested binary (`v22.4.r-fx2d`, 106 788 bytes, SHA-256 `d212cf8def6f239db997c
 
 Patches stored in QSPI flash and the device settings are not touched by flashing the internal flash. On the tested module, slots and storage were identical before and after.
 
-## Test status of `v22.4.r-fx2d`
+## Test status
 
+`v22.4.r-fx3l`: see "ITCM hot path" above. Flashed and read back, version, slots and storage unchanged after flashing.
+
+`v22.4.r-fx2d`:
 - Flashed and read back, version, slots and storage unchanged after flashing.
 - Input LEDs: without a host stream they follow the knobs as before; while recording they follow the raw input and the knobs have no effect on them.
-- **Not yet verified:** the red clip LED with a signal above full scale.
+- Red clip LED verified in the loop-back test (sine and DC up to full scale): on from ≈ −0.1 dBFS.
 - **Noise** (open inputs, 2 × 60 s each, compared with `v22.4.r-fx1d` flashed back as a control in the same session):
 
   | Measure | `v22.4.r-fx2d` − `v22.4.r-fx1d` |
@@ -146,11 +189,11 @@ So on this module the **position of code and data in memory** changes the block-
 Consequences:
 - Any firmware change can move these lines by a few dB, even if it only touches code outside the audio path. Comparisons between builds measure the code **and** its layout.
 - `v22.4.r-fx2d` therefore keeps every existing address and only appends code.
-- The layout could be used deliberately: different paddings might lower the lines below the current state. Not tried yet.
+- `v22.4.r-fx3l` removes the dependence: with the periodic code in ITCM, 0x150 bytes of padding in flash change no measure by more than 0.25 dB (see "ITCM hot path").
 
 ## Measurements (one module, macOS, Eurorack case)
 
-Measured with `v22.4.r-fx1d`. `v22.4.r-fx2d` matches it within the table in "Test status" above.
+Measured with `v22.4.r-fx1d`. `v22.4.r-fx2d` matches it within the table in "Test status" above. For `v22.4.r-fx3l` see "ITCM hot path". Absolute levels vary by about 1 dB between sessions (host load, USB port), so compare builds only within one session.
 
 Levels are in dBFS of the USB stream (16 bit), inputs open, gain knob at 12 o'clock.
 
@@ -173,7 +216,7 @@ Levels are in dBFS of the USB stream (16 bit), inputs open, gain knob at 12 o'cl
 - **Not addressed:**
   - the 1 kHz comb in recordings (it is in the ADC data while USB is active)
   - the LED PWM line at ≈ 2321 Hz (visible with signal)
-  - the fs/8 line
+  - the rest of the fs/8 line (≈ 5 dB lower with `v22.4.r-fx3l`)
 
   Possible next experiments: block size 16, LED PWM moved out of the audio band, codec high-pass filter.
 
