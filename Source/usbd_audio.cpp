@@ -1436,6 +1436,16 @@ static uint8_t  USBD_AUDIO_SOF (USBD_HandleTypeDef *pdev) {
   /* SOF (Start of Frame) Every millisecond the USB host transmits a special SOF (start of frame) token, containing an 11-bit incrementing frame number in place of a device address. This is used to synchronize isochronous and interrupt data transfers. */
   USBD_AUDIO_HandleTypeDef* haudio;
   haudio = (USBD_AUDIO_HandleTypeDef*)pdev->pClassData;  
+  /* AC/DC fork, Patch 14 (acdc project messlog D46): count every frame once. With the
+     USB interrupt handler in ITCM this callback ran twice in almost every frame
+     (measured), presumably because the handler re-enters before the cleared
+     GINTSTS.SOF flag has taken effect in the USB clock domain. The feedback period (FB_RATE SOFs) then covered only about half
+     the time, the feedback sent to the host was wrong and the RX buffer ran empty. */
+  static uint16_t sof_last_fn = 0xffff;
+  uint16_t sof_fn = USB_SOF_NUMBER();
+  if(sof_fn == sof_last_fn)
+    return USBD_OK;
+  sof_last_fn = sof_fn;
 #if defined(USE_USBD_RX_FB)
   static uint32_t sof_count = 0;
   if(++sof_count == FB_RATE){
