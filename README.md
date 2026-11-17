@@ -2,7 +2,7 @@
 
 This branch is an unofficial firmware for the **Rebel Technology / Befaco AC/DC** Eurorack USB audio interface. It is based on OpenWare and has two goals:
 
-1. **Standalone use:** without a computer, the patch in slot 1 runs and its output reaches the jacks. A stored FX patch can be used without USB.
+1. **Standalone use:** without a computer, a stored patch runs and its output reaches the jacks. A stored FX patch can be used without USB. Which slot starts is chosen with the knobs in a boot menu and remembered, see "Boot menu" below.
 2. **Normal USB interface with a computer:** the computer records the **raw inputs** (before the patch). Host playback goes to the outputs, and the USB clock no longer drifts. While recording, the input LEDs show the raw input level.
 3. **Less noise:** the periodic code runs from ITCM. This lowers the fs/8 line by about 5 dB and removes the mixing products, see "ITCM hot path" below.
 
@@ -15,9 +15,9 @@ Discussion: [AC/DC as FX when not connected to computer (#2244)](https://communi
 | Branch | Firmware version | Content |
 |---|---|---|
 | `acdc/thru-usb-feedback` | `v22.4.r-thru1d` | Standalone pass-through + USB fixes. The computer records the patch output (stock routing) |
-| **`acdc/fx1d`** (this one) | `v22.4.r-fx3l` | as above + the computer records the raw inputs, USB product string `OWL-ACDC-FX`, input LEDs show the raw level while recording, hot path in ITCM |
+| **`acdc/fx1d`** (this one) | `v22.4.r-fx4b` | as above + the computer records the raw inputs, USB product string `OWL-ACDC-FX`, input LEDs show the raw level while recording, hot path in ITCM, boot menu to choose the patch slot |
 
-The branch name is historical: `v22.4.r-fx1d` is commit `11199347` on this branch (raw inputs to USB, LEDs unchanged), `v22.4.r-fx2d` is `abc3a72a` (raw input LEDs, code in flash).
+The branch name is historical: `v22.4.r-fx1d` is commit `11199347` on this branch (raw inputs to USB, LEDs unchanged), `v22.4.r-fx2d` is `abc3a72a` (raw input LEDs, code in flash), `v22.4.r-fx3l` is `5cb2c17c` (hot path in ITCM, slot 1 always starts).
 
 ## Base: why v22.4.r and not v22.5.0
 
@@ -48,6 +48,8 @@ The base is upstream commit `db9d3dd` ("v22.4.r: MCLK=512fs", 2022-07-13) on Mar
 | `0b7122de` | **Run the periodic hot path from ITCM** | See "ITCM hot path" below |
 | `fb2c6ed9` | **USB audio: evaluate SOF only once per frame** | Fixes wrong feedback with the USB handler in ITCM, see "ITCM hot path" below |
 | `5cb2c17c` | Version `v22.4.r-fx3l` | |
+| `7ef6284a` | **Boot menu to choose the patch slot at power-on**, the slot is remembered | See "Boot menu" below |
+| `2c963e3a` | Version `v22.4.r-fx4b` | |
 
 ### USB feedback fix (`6753794f`)
 
@@ -109,6 +111,32 @@ Results (one module, open inputs, gain at 12 o'clock, 2 × 60 s each, compared w
 - With the USB code in flash and everything else in ITCM, the comb was 3.5 dB higher than with `v22.4.r-fx2d`. The comb needs the USB code in ITCM.
 - **In daily use since 2026-11-16 on the tested module.** Not yet checked: patches that need more than 39.3 KB of heap.
 
+## Boot menu (`v22.4.r-fx4b`)
+
+Stock OpenWare always starts slot 1 at power-on, and the AC/DC has no button to change the patch. So without a computer only one patch was usable. The boot menu uses the four knobs and the LEDs instead.
+
+**Open the menu:** power on with knobs 1, 2 and 3 fully left and knob 4 fully right.
+
+| Step | Action | LEDs |
+|---|---|---|
+| Menu open | (the knob pattern at power-on) | output LEDs lit, input LEDs show the remembered slot |
+| Select | turn knob 1. Only occupied slots 1 to 15 can be selected, they share the knob travel evenly | input LEDs show the selected slot, output LEDs blink while confirming would change the slot |
+| Confirm | turn knob 4 away from the right stop | the slot starts and is remembered |
+| Cancel | turn knob 3 away from the left stop, or wait 30 s | the remembered slot starts, nothing is written |
+
+- The input LEDs show the slot number in binary: LED 1 = 1, LED 2 = 2, LED 3 = 4, LED 4 = 8.
+- Knob 1 only counts once it has been moved. Until then the remembered slot stays selected, so confirming by accident changes nothing. For the lowest slot, turn knob 1 away and back.
+- Without the knob pattern the remembered slot starts, and its number is shown for one second after the start-up chaser.
+- No patch runs while the menu is open, the outputs are silent.
+- If the remembered slot is empty or nothing was remembered yet, slot 1 starts, or the first occupied slot.
+- A Program Change from the computer still switches the running patch, but it is not remembered.
+
+**Where the slot is stored:** in a 4 byte system resource `ACDC.slot` in the patch flash (QSPI). The application settings are not touched. Each change appends 256 bytes and marks the old record as erased, so the storage lasts for tens of thousands of changes. With less than 64 KB of free storage the firmware does not write any more: the slot starts without being remembered and the input LEDs flash red for a second. This keeps the storage from running into a defrag, which erases the whole patch flash.
+
+**Implementation:** `acdcBootSelect()` in `ACDC/Core/Src/ACDC.cpp`, called from `bootstrap()` in `Source/ProgramManager.cpp`. It runs in the manager task before the first patch starts. The scheduler is cooperative, so the main loop (MIDI, watchdog) keeps running while the menu sleeps, and the module stays reachable over USB MIDI. The only code added to the periodic path is one test at the start of the `onLoop` LED code. The menu itself is ordinary flash code, the ITCM block grows by 40 bytes.
+
+**Tested** on one module: the knob stops read 2 and 127 of 127 (7 bit), the thresholds are 5 % and 95 %. Selecting, confirming, cancelling with knob 3, the timeout and starting from the remembered slot work. USB loop-back (4 sines, 60 s): no slips and no stale samples, also with a patch that uses 53 % CPU. Noise against `v22.4.r-fx3l` in the same session (fx4b, fx3l, fx4b, 2 × 60 s each, open inputs): all four measures within ±0.4 dB, on average within ±0.2 dB.
+
 ## Input LEDs (`6d3b8bd5`)
 
 Each input has a green level LED and a red clip LED. The four green output LEDs are unchanged (the firmware measures the DAC data).
@@ -163,6 +191,8 @@ The tested binary is `v22.4.r-fx3l`: 107 340 bytes, SHA-256 `b55b94d8734baf1cf76
 Patches stored in QSPI flash and the device settings are not touched by flashing the internal flash. On the tested module, slots and storage were identical before and after.
 
 ## Test status
+
+`v22.4.r-fx4b`: see "Boot menu" above. Flashed and read back, slots and storage unchanged after flashing.
 
 `v22.4.r-fx3l`: see "ITCM hot path" above. Flashed and read back, version, slots and storage unchanged after flashing.
 
