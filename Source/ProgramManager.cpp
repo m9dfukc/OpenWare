@@ -580,6 +580,18 @@ void bootstrap(){
 #else    
   uint8_t lastprogram = 0;
 #endif
+#ifdef OWL_ACDC
+  // AC/DC fork: the slot remembered by the boot menu starts instead of slot 1.
+  // Blocks while the menu is open (ACDC/Core/Src/ACDC.cpp). Settings stay RAM only.
+  extern uint8_t acdcBootSelect();
+  uint8_t bootslot = acdcBootSelect();
+  if(bootslot != 0)
+    settings.program_index = bootslot;
+  if(bootslot == 0){
+    // a host sent a Program Change or an upload while the menu was open:
+    // its request is pending in the manager task, start nothing here
+  }else
+#endif
   if(lastprogram != 0 && lastprogram == settings.program_index){
     error(CONFIG_ERROR, "Preventing reset program from starting");
 #ifdef USE_BKPSRAM
