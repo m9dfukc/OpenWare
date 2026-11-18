@@ -15,9 +15,9 @@ Discussion: [AC/DC as FX when not connected to computer (#2244)](https://communi
 | Branch | Firmware version | Content |
 |---|---|---|
 | `acdc/thru-usb-feedback` | `v22.4.r-thru1d` | Standalone pass-through + USB fixes. The computer records the patch output (stock routing) |
-| **`acdc/fx1d`** (this one) | `v22.4.r-fx4b` | as above + the computer records the raw inputs, USB product string `OWL-ACDC-FX`, input LEDs show the raw level while recording, hot path in ITCM, boot menu to choose the patch slot |
+| **`acdc/fx1d`** (this one) | `v22.4.r-fx5a` | as above + the computer records the raw inputs, USB product string `OWL-ACDC-FX`, input LEDs show the raw level while recording, hot path in ITCM, boot menu to choose the patch slot, MIDI send path fixed |
 
-The branch name is historical: `v22.4.r-fx1d` is commit `11199347` on this branch (raw inputs to USB, LEDs unchanged), `v22.4.r-fx2d` is `abc3a72a` (raw input LEDs, code in flash), `v22.4.r-fx3l` is `5cb2c17c` (hot path in ITCM, slot 1 always starts).
+The branch name is historical: `v22.4.r-fx1d` is commit `11199347` on this branch (raw inputs to USB, LEDs unchanged), `v22.4.r-fx2d` is `abc3a72a` (raw input LEDs, code in flash), `v22.4.r-fx3l` is `5cb2c17c` (hot path in ITCM, slot 1 always starts), `v22.4.r-fx4b` is `2c963e3a` (boot menu).
 
 ## Base: why v22.4.r and not v22.5.0
 
@@ -50,6 +50,8 @@ The base is upstream commit `db9d3dd` ("v22.4.r: MCLK=512fs", 2022-07-13) on Mar
 | `5cb2c17c` | Version `v22.4.r-fx3l` | |
 | `7ef6284a` | **Boot menu to choose the patch slot at power-on**, the slot is remembered | See "Boot menu" below |
 | `2c963e3a` | Version `v22.4.r-fx4b` | |
+| `bd04588e` | **MIDI: USB send path atomic, flow control for slot downloads** | See "MIDI send path" below |
+| `c222fa49` | Version `v22.4.r-fx5a` | |
 
 ### USB feedback fix (`6753794f`)
 
@@ -137,6 +139,28 @@ Stock OpenWare always starts slot 1 at power-on, and the AC/DC has no button to 
 
 **Tested** on one module: the knob stops read 2 and 127 of 127 (7 bit), the thresholds are 5 % and 95 %. Selecting, confirming, cancelling with knob 3, the timeout and starting from the remembered slot work. USB loop-back (4 sines, 60 s): no slips and no stale samples, also with a patch that uses 53 % CPU. Noise against `v22.4.r-fx3l` in the same session (fx4b, fx3l, fx4b, 2 × 60 s each, open inputs): all four measures within ±0.4 dB, on average within ±0.2 dB.
 
+## MIDI send path (`v22.4.r-fx5a`)
+
+**The problem:** while a patch was running, downloading a stored slot over MIDI (SysEx `0x18`, as backup tools do) delivered damaged data in about one of four cases, and sometimes the module then stopped sending MIDI until a power cycle. Audio kept running. On the tested module with `v22.4.r-fx4b`: 19 of 79 downloads damaged, then the hang. The code is the same in upstream `master`.
+
+**The cause:**
+- The MIDI send buffer is written from three contexts: the audio task, the main loop and the USB interrupt (replies to SysEx requests are generated there). Nothing protected it.
+- `transmit()` was called from the audio task in every block and from `write()` at every wrap of the buffer. `usbd_midi_tx()` silently sent nothing while a transfer was running, but the read head advanced all the same, so data was lost.
+- Two contexts could start a transfer on the same endpoint twice. This is the likely cause of the hang, it has not been proven.
+- The read head moved when a transfer started, although USB copies the data out of the ring buffer afterwards.
+- `write()` never checked for a full buffer, and the slot download wrote 324 bytes every 2 ms without waiting for room.
+
+**The fix (`bd04588e`):**
+- Every access to the buffer state runs with interrupts masked, for about a microsecond. Check, start and bookkeeping of a transfer are one piece.
+- The read head only moves once the transfer has completed.
+- A full buffer drops the new message instead of overwriting unsent data, and reports `midi tx ovf` once as the program message.
+- `transmit()` leaves without masking while there is nothing to start, so the audio task pays nothing in the idle case. The function stays in ITCM and grows by 48 bytes.
+- The slot download only queues a message that fits as a whole and gives up after 5 s without room.
+
+**Not covered:** a reply generated in the interrupt can still fall into the middle of a SysEx sent from the main loop. This only happens if the computer sends a request during a download. `Source/usbd_midi.c` (other devices, bootloader) gets the same contract, but only the AC/DC was built and tested.
+
+**Tested** on one module, against `v22.4.r-fx4b` in the same session: 240 of 240 downloads intact and no hang, with patches using 32 % and 51 % CPU and with an audio stream running. USB loop-back (4 sines, 60 s): no slips and no stale samples, also while 40 downloads were running. Noise with open inputs (fx4b, fx5a, fx4b, fx5a, 2 × 60 s each): RMS, residual, comb and fs/8 within ±0.5 dB in every block. The mixing products were +0.7 dB on average, while the two fx4b controls differed by 2.3 dB, so this session cannot decide them.
+
 ## Input LEDs (`6d3b8bd5`)
 
 Each input has a green level LED and a red clip LED. The four green output LEDs are unchanged (the firmware measures the DAC data).
@@ -162,12 +186,12 @@ git clone -b acdc/fx1d https://github.com/m9dfukc/OpenWare.git
 cd OpenWare
 git submodule update --init      # Libraries at 9e8f64e
 make -C ACDC CONFIG=Release TOOLROOT=/path/to/arm-gnu-toolchain/bin/ all
-# result: ACDC/Build/ACDC.bin (≈ 106 KB, must stay below 128 KB internal flash)
+# result: ACDC/Build/ACDC.bin (≈ 107 KB, must stay below 128 KB internal flash)
 ```
 
-The tested binary is `v22.4.r-fx3l`: 107 340 bytes, SHA-256 `b55b94d8734baf1cf763dfefb380a561029bd00d4a645cdcef3b75d99e6f010e`.
+The tested binary is `v22.4.r-fx5a`: 109 524 bytes, SHA-256 `b69c25b3f469fc6fb793b16569c53a63a7333c32d83c96de4d97b6fb71bdb8ef`.
 - A build of this branch with Arm GNU Toolchain 12.2.Rel1 and `CONFIG=Release` is byte identical to it.
-- Earlier tested binaries: `v22.4.r-fx2d` (state at `abc3a72a`, 106 788 bytes, SHA-256 `d212cf8def6f239db997cd45a73304db9bcaf981375e55fdfc2ca2862718832a`) and `v22.4.r-fx1d` (state at `11199347`, 105 968 bytes, SHA-256 `7f9f9a34b5b19a0245f0ab15426d891adc4f00505c86236cadec167e0402925b`).
+- Earlier tested binaries: `v22.4.r-fx4b` (state at `2c963e3a`, 108 496 bytes, SHA-256 `a21f35c990cc33737620597d883c4bd205fc4495bf2291a1b6013af6f2b06307`), `v22.4.r-fx3l` (state at `5cb2c17c`, 107 340 bytes, SHA-256 `b55b94d8734baf1cf763dfefb380a561029bd00d4a645cdcef3b75d99e6f010e`), `v22.4.r-fx2d` (state at `abc3a72a`, 106 788 bytes, SHA-256 `d212cf8def6f239db997cd45a73304db9bcaf981375e55fdfc2ca2862718832a`) and `v22.4.r-fx1d` (state at `11199347`, 105 968 bytes, SHA-256 `7f9f9a34b5b19a0245f0ab15426d891adc4f00505c86236cadec167e0402925b`).
 - These two were built from `db9d3dd` plus the same changes as patch files. Their code matches the branch, only some comments differ.
 
 ## Flash (ST ROM DFU, front USB-B jack)
@@ -191,6 +215,8 @@ The tested binary is `v22.4.r-fx3l`: 107 340 bytes, SHA-256 `b55b94d8734baf1cf76
 Patches stored in QSPI flash and the device settings are not touched by flashing the internal flash. On the tested module, slots and storage were identical before and after.
 
 ## Test status
+
+`v22.4.r-fx5a`: see "MIDI send path" above. Flashed and read back, version, slots and storage unchanged after flashing.
 
 `v22.4.r-fx4b`: see "Boot menu" above. Flashed and read back, slots and storage unchanged after flashing.
 
