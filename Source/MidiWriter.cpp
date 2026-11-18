@@ -13,6 +13,7 @@
 #include "uart_midi.h"
 #endif
 #include "SerialBuffer.hpp"
+#include "message.h"
 
 void MidiWriter::sendErrorMessage(const char* msg){
   char buf[64];
@@ -87,22 +88,67 @@ public:
 };
 
 #ifdef USE_USBD_MIDI
+/* The buffer is written from the audio task, the main loop and the USB
+ * interrupt (replies to SysEx requests), and transmit() is called from the
+ * audio task and the main loop. Every access to the buffer state therefore
+ * runs with interrupts masked (about a microsecond).
+ * - A transfer is started and remembered in one piece, so two contexts can
+ *   never start one on the same endpoint or advance the read head twice.
+ * - USB copies the data out of this buffer after usbd_midi_tx() has returned
+ *   (64 byte packets, in the USB interrupt). The read head only moves once
+ *   the transfer has completed; until then the bytes still count as used.
+ * - A full buffer drops the new message instead of overwriting unsent data.
+ */
 class UsbdMidiTransmitter : public MidiTransmitter {
 private:
   SerialBuffer<MIDI_OUTPUT_BUFFER_SIZE> buffer;
-public:
-  void write(MidiMessage msg){
-    if(buffer.getContiguousWriteCapacity() <= 4)
-      transmit();
-    buffer.push(msg.data, 4);
-  }
-  void transmit(){
-    size_t len = buffer.getContiguousReadCapacity();
-    if(len >= 4 && usbd_midi_ready()){
-      usbd_midi_tx(buffer.getReadHead(), len);
-      buffer.incrementReadHead(len);
-      // len = buffer.getContiguousReadCapacity();
+  volatile size_t inflight = 0; // bytes handed to USB, transfer not yet completed
+  volatile bool overflow = false;
+  // call with interrupts masked
+  inline __attribute__((always_inline)) void transmitMasked(){
+    if(usbd_midi_ready()){
+      if(inflight){
+	// previous transfer has completed: release its bytes
+	buffer.incrementReadHead(inflight);
+	inflight = 0;
+      }
+      size_t len = buffer.getContiguousReadCapacity();
+      if(len >= 4 && usbd_midi_tx(buffer.getReadHead(), len))
+	inflight = len;
     }
+  }
+public:
+  size_t getWriteCapacity(){
+    // keep one packet free: a full buffer must not look like an empty one
+    size_t used = buffer.getReadCapacity();
+    return used + 4 < MIDI_OUTPUT_BUFFER_SIZE ? MIDI_OUTPUT_BUFFER_SIZE - 4 - used : 0;
+  }
+  void write(MidiMessage msg){
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    if(getWriteCapacity() < 4)
+      transmitMasked(); // releases the bytes of a completed transfer
+    bool ok = getWriteCapacity() >= 4;
+    if(ok)
+      buffer.push(msg.data, 4);
+    __set_PRIMASK(primask);
+    if(ok){
+      overflow = false;
+    }else if(!overflow && usbd_midi_connected()){
+      overflow = true; // report once per episode, and only if a host is there to read
+      debugMessage("midi tx ovf");
+    }
+  }
+  inline __attribute__((always_inline)) void transmit(){
+    // Unmasked early exits, so the audio task masks nothing while idle, while
+    // a transfer is running or without a host. Both tests are repeated or
+    // harmless under the mask: a missed chance is taken in the next block.
+    if((inflight == 0 && !buffer.notEmpty()) || !usbd_midi_ready())
+      return;
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    transmitMasked();
+    __set_PRIMASK(primask);
   }
 };
 UsbdMidiTransmitter usbd_midi;
@@ -182,6 +228,14 @@ void MidiWriter::send(MidiMessage msg){
 // #ifdef USE_DIGITALBUS
 //   bus_tx_frame(msg.data);
 // #endif /* USE_DIGITALBUS */
+}
+
+size_t MidiWriter::getWriteCapacity(){
+#ifdef USE_USBD_MIDI
+  return usbd_midi.getWriteCapacity();
+#else
+  return MIDI_OUTPUT_BUFFER_SIZE;
+#endif
 }
 
 void MidiWriter::transmit(){

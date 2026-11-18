@@ -13,7 +13,7 @@
    uint8_t usbd_midi_connected(void);
    uint8_t usbd_midi_ready(void);
    void usbd_midi_rx(uint8_t *buffer, uint32_t length);
-   void usbd_midi_tx(uint8_t* buffer, uint32_t length);
+   uint8_t usbd_midi_tx(uint8_t* buffer, uint32_t length); /* returns 1 if the transfer was started */
 #endif
 
 #ifdef USE_USB_HOST

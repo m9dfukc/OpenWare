@@ -146,20 +146,33 @@ void MidiController::sendResourceNames(){
 class SendResourceTask : public BackgroundTask {
 private:
   size_t index;
+  size_t waiting;
   Resource* resource;
   static constexpr size_t msgsize = 203; // number of resource bytes we send with each SysEx
+  static constexpr size_t maxwait = 2500; // loops (5 s) without room in the MIDI buffer before giving up
 public:
   void setResource(Resource* resource){
     this->resource = resource;
   }
   void begin(){
     index = 0;
+    waiting = 0;
   }
   void loop(){
     if(!resource){      
       owl.setBackgroundTask(NULL); // end this task
       return;
     }
+    // flow control: only queue a message that fits as a whole, else try again in the next loop
+    if(midi_tx.getWriteCapacity() < MidiWriter::getSysExSize(msgsize*8/7+6)){
+      if(++waiting > maxwait){
+	// host does not read: give up instead of blocking the background task for ever
+	resource = NULL;
+	owl.setBackgroundTask(NULL);
+      }
+      return;
+    }
+    waiting = 0;
     size_t len = resource->getDataSize();
     size_t offset = msgsize*(index-1);
     uint8_t data[msgsize];

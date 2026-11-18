@@ -1716,7 +1716,11 @@ void usbd_audio_write(uint8_t* buf, size_t len) {
 #endif
 }
 
-void usbd_midi_tx(uint8_t* buf, uint32_t len) {
+/* Returns 1 if the transfer was started, 0 if nothing was sent (not configured
+ * or a transfer is still in progress). The caller must keep interrupts masked
+ * from its usbd_midi_ready() check until this call returns and must not release
+ * the data before the transfer has completed (usbd_midi_ready() is true again). */
+uint8_t usbd_midi_tx(uint8_t* buf, uint32_t len) {
 #ifdef USE_USBD_MIDI
   extern USBD_HandleTypeDef USBD_HANDLE;
   USBD_AUDIO_HandleTypeDef *haudio = (USBD_AUDIO_HandleTypeDef*)USBD_HANDLE.pClassData;
@@ -1724,8 +1728,10 @@ void usbd_midi_tx(uint8_t* buf, uint32_t len) {
     /* the call is non-blocking, and the DataIn callback of your USBD class is called with the endpoint number (excluding 0x80 bit) when the entire buffer has been transmitted over the endpoint */
     haudio->midi_tx_lock = 1;
     USBD_LL_Transmit(&USBD_HANDLE, MIDI_TX_EP, buf, len);
+    return 1;
   }
 #endif /* USE_USBD_MIDI */
+  return 0;
 }
 
 uint8_t usbd_midi_connected(void){

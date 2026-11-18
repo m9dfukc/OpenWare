@@ -388,12 +388,14 @@ uint8_t  *USBD_Midi_DeviceQualifierDescriptor (uint16_t *length)
 static volatile int midi_tx_lock = 0;
 
 #ifdef USE_USBD_HS
-void usbd_midi_tx(uint8_t* buf, uint32_t len) {
+uint8_t usbd_midi_tx(uint8_t* buf, uint32_t len) {
   extern USBD_HandleTypeDef hUsbDeviceHS;
-  if(hUsbDeviceHS.dev_state == USBD_STATE_CONFIGURED){
+  if(hUsbDeviceHS.dev_state == USBD_STATE_CONFIGURED && !midi_tx_lock){
     midi_tx_lock = 1;
     USBD_LL_Transmit(&hUsbDeviceHS, MIDI_IN_EP, buf, len);
+    return 1;
   }
+  return 0;
 }
 uint8_t usbd_midi_connected(void){
   extern USBD_HandleTypeDef hUsbDeviceHS;
@@ -402,12 +404,14 @@ uint8_t usbd_midi_connected(void){
 #endif /* USE_USBD_HS */
 
 #ifdef USE_USBD_FS
-void usbd_midi_tx(uint8_t* buf, uint32_t len) {
+uint8_t usbd_midi_tx(uint8_t* buf, uint32_t len) {
   extern USBD_HandleTypeDef hUsbDeviceFS;
-  if(hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED){
+  if(hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED && !midi_tx_lock){
     midi_tx_lock = 1;
     USBD_LL_Transmit(&hUsbDeviceFS, MIDI_IN_EP, buf, len);
+    return 1;
   }
+  return 0;
 }
 uint8_t usbd_midi_connected(void){
   extern USBD_HandleTypeDef hUsbDeviceFS;

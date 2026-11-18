@@ -2,6 +2,7 @@
 #define _MidiWriter_h_
 
 #include <inttypes.h>
+#include <stddef.h>
 #include "device.h"
 #include "MidiMessage.h"
 #include "MidiStatus.h"
@@ -24,6 +25,12 @@ public:
   void send(MidiMessage msg);
   
   void transmit();
+  /* bytes that can be queued for USB right now without losing anything */
+  size_t getWriteCapacity();
+  /* bytes that sendSysEx() queues for a SysEx with this many payload bytes */
+  static constexpr size_t getSysExSize(size_t size){
+    return (size/3 + 2)*4;
+  }
 };
 
 #endif /* _MidiWriter_h_ */

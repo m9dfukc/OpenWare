@@ -178,7 +178,7 @@ void usbd_audio_write(uint8_t* buffer, size_t len);
 uint32_t usbd_audio_get_rx_count();
 
 void usbd_midi_rx(uint8_t *buffer, uint32_t length);
-void usbd_midi_tx(uint8_t* buffer, uint32_t length);
+uint8_t usbd_midi_tx(uint8_t* buffer, uint32_t length);
 uint8_t usbd_midi_connected(void);
 uint8_t usbd_midi_ready(void);
 void usbd_audio_error(const char* msg, int diff);
