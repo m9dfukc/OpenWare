@@ -15,9 +15,9 @@ Discussion: [AC/DC as FX when not connected to computer (#2244)](https://communi
 | Branch | Firmware version | Content |
 |---|---|---|
 | `acdc/thru-usb-feedback` | `v22.4.r-thru1d` | Standalone pass-through + USB fixes. The computer records the patch output (stock routing) |
-| **`acdc/fx1d`** (this one) | `v22.4.r-fx5a` | as above + the computer records the raw inputs, USB product string `OWL-ACDC-FX`, input LEDs show the raw level while recording, hot path in ITCM, boot menu to choose the patch slot, MIDI send path fixed |
+| **`acdc/fx1d`** (this one) | `v22.4.r-fx7a` | as above + the computer records the raw inputs, USB product string `OWL-ACDC-FX`, input LEDs show the raw level while recording, hot path in ITCM, boot menu to choose the patch slot, MIDI send path fixed, LED mode (normal / clip only / off), LED PWM at 48 kHz |
 
-The branch name is historical: `v22.4.r-fx1d` is commit `11199347` on this branch (raw inputs to USB, LEDs unchanged), `v22.4.r-fx2d` is `abc3a72a` (raw input LEDs, code in flash), `v22.4.r-fx3l` is `5cb2c17c` (hot path in ITCM, slot 1 always starts), `v22.4.r-fx4b` is `2c963e3a` (boot menu).
+The branch name is historical: `v22.4.r-fx1d` is commit `11199347` on this branch (raw inputs to USB, LEDs unchanged), `v22.4.r-fx2d` is `abc3a72a` (raw input LEDs, code in flash), `v22.4.r-fx3l` is `5cb2c17c` (hot path in ITCM, slot 1 always starts), `v22.4.r-fx4b` is `2c963e3a` (boot menu), `v22.4.r-fx5a` is `c222fa49` (MIDI send path), `v22.4.r-fx6a` is `34782dea` (LED mode).
 
 ## Base: why v22.4.r and not v22.5.0
 
@@ -52,6 +52,10 @@ The base is upstream commit `db9d3dd` ("v22.4.r: MCLK=512fs", 2022-07-13) on Mar
 | `2c963e3a` | Version `v22.4.r-fx4b` | |
 | `bd04588e` | **MIDI: USB send path atomic, flow control for slot downloads** | See "MIDI send path" below |
 | `c222fa49` | Version `v22.4.r-fx5a` | |
+| `1cf56d3e` | **LED mode normal / clip only / off**, chosen with knob 2 in the boot menu and remembered | See "LEDs" below |
+| `34782dea` | Version `v22.4.r-fx6a` | |
+| `bd5ee463` | **LED PWM at 48 kHz, locked to the sample clock** (was 2320.54 Hz) | See "LEDs" below |
+| `351b2071` | Version `v22.4.r-fx7a` | |
 
 ### USB feedback fix (`6753794f`)
 
@@ -161,6 +165,21 @@ Stock OpenWare always starts slot 1 at power-on, and the AC/DC has no button to 
 
 **Tested** on one module, against `v22.4.r-fx4b` in the same session: 240 of 240 downloads intact and no hang, with patches using 32 % and 51 % CPU and with an audio stream running. USB loop-back (4 sines, 60 s): no slips and no stale samples, also while 40 downloads were running. Noise with open inputs (fx4b, fx5a, fx4b, fx5a, 2 × 60 s each): RMS, residual, comb and fs/8 within ±0.5 dB in every block. The mixing products were +0.7 dB on average, while the two fx4b controls differed by 2.3 dB, so this session cannot decide them.
 
+## LEDs: mode and PWM rate (`v22.4.r-fx6a`, `v22.4.r-fx7a`)
+
+**The problem:** every lit input LED shifts the zero point of **all** inputs by about −2.9e-4 full scale (≈ −2.9 mV, −71 dBFS), measured in the raw ADC data by a patch on the module itself. All inputs move alike, so the LED current probably shifts a common reference of the converter (not verified). A steadily lit LED is only an offset. Every change is a step, about 30 dB above the comb lines of the raw inputs. A dimmed LED repeats the step at the PWM rate: that is the line at 2320.54 Hz with harmonics, at −115 dB in the raw inputs with open inputs and up to −40 dBFS at an output when a patch dims an LED and passes its input on. The level LEDs follow the signal, so this is in every recording.
+
+**LED mode (`1cf56d3e`, `v22.4.r-fx6a`):** in the boot menu (see above) knob 2 now selects an LED mode: left third **normal** (as before), middle third **clip only** (all dark, an input LED turns red only while the computer records and a raw input reaches −0.1 dBFS, held 300 ms), right third **off**. Like knob 1 it only counts once it has been moved, otherwise the remembered mode stays. The output LEDs show the mode in the menu (four, two or none lit). The mode is remembered in its own 4 byte resource `ACDC.led`, separate from `ACDC.slot`, with the same 64 KB reserve. In the dark modes the main loop switches the LEDs off once and then writes no pin or timer register while nothing changes; the new code sits in the padding of `.text.onLoop`, every other function in ITCM keeps its address.
+- Measured: in mode off the LED shift of the inputs drops to 1.3–1.7 % (about −37 dB), also without the menu after a power cycle. In mode clip only the inputs jump by about −0.2 mV exactly when the red LED switches on, 220 ms before the converter clips: the red LED is the step, not the overload.
+
+**LED PWM at 48 kHz (`bd5ee463`, `v22.4.r-fx7a`):** the LED timers TIM2/3/4/8 now run with prescaler 4 and period 999: 240 MHz / 5000 = 48 000 Hz instead of 240 MHz / (101 × 1024) = 2320.54 Hz. The timers run from PLL1, SAI1 from PLL3, both from the same 8 MHz crystal, so the PWM sits 0.1 ppm above the sample rate. `setLed()` (in ITCM) is unchanged: `pwm = 1024 − v` with an auto-reload of 999 keeps off off and full on at 999/1000, values below 2.4 % stay dark. Only the timer init changes, the ITCM content is byte identical with `v22.4.r-fx6a`.
+- Measured: with a patch dimming three LEDs to 60 %, the line at an output fell from −39.8 dBFS to the noise floor (−85 dBFS, so at least 45 dB). In the raw inputs the 2320.54 Hz line found with `v22.4.r-fx6a` (−115 dB) is gone. No new line appeared, also not below 20 Hz.
+- **Not changed:** the slow shift with the LED brightness stays. Against that only the modes clip only and off help.
+
+**Tested** on one module: noise of `v22.4.r-fx6a` (mode normal) against `v22.4.r-fx5a`, and of `v22.4.r-fx7a` against `v22.4.r-fx6a`, each with controls before and after: no difference beyond the session drift (`v22.4.r-fx7a` within 0.15 dB of `v22.4.r-fx6a` in RMS, residual, comb and fs/8). USB loop-back (4 sines, 60 s): no slips and no stale samples with both. 240 of 240 slot downloads intact with `v22.4.r-fx6a`.
+
+**Known issue (older than these builds, also in `v22.4.r-fx5a`):** a Program Change while the USB audio stream is open breaks playback until the next stream start (about 10 % silence on all outputs, the device reports `fb clamp`). Change the patch before opening the stream.
+
 ## Input LEDs (`6d3b8bd5`)
 
 Each input has a green level LED and a red clip LED. The four green output LEDs are unchanged (the firmware measures the DAC data).
@@ -189,9 +208,9 @@ make -C ACDC CONFIG=Release TOOLROOT=/path/to/arm-gnu-toolchain/bin/ all
 # result: ACDC/Build/ACDC.bin (≈ 107 KB, must stay below 128 KB internal flash)
 ```
 
-The tested binary is `v22.4.r-fx5a`: 109 524 bytes, SHA-256 `b69c25b3f469fc6fb793b16569c53a63a7333c32d83c96de4d97b6fb71bdb8ef`.
+The tested binary is `v22.4.r-fx7a`: 110 088 bytes, SHA-256 `cac6fee0f86426aed3d9b5bfaa2ff758b69de59ed7e11971f2a2ba0d0233ff20`.
 - A build of this branch with Arm GNU Toolchain 12.2.Rel1 and `CONFIG=Release` is byte identical to it.
-- Earlier tested binaries: `v22.4.r-fx4b` (state at `2c963e3a`, 108 496 bytes, SHA-256 `a21f35c990cc33737620597d883c4bd205fc4495bf2291a1b6013af6f2b06307`), `v22.4.r-fx3l` (state at `5cb2c17c`, 107 340 bytes, SHA-256 `b55b94d8734baf1cf763dfefb380a561029bd00d4a645cdcef3b75d99e6f010e`), `v22.4.r-fx2d` (state at `abc3a72a`, 106 788 bytes, SHA-256 `d212cf8def6f239db997cd45a73304db9bcaf981375e55fdfc2ca2862718832a`) and `v22.4.r-fx1d` (state at `11199347`, 105 968 bytes, SHA-256 `7f9f9a34b5b19a0245f0ab15426d891adc4f00505c86236cadec167e0402925b`).
+- Earlier tested binaries: `v22.4.r-fx6a` (state at `34782dea`, 110 088 bytes, SHA-256 `6a3fc427b30ae1043b239f01e5ecf9894db92d9a6ca3dc51b47cc9a6f80260eb`), `v22.4.r-fx5a` (state at `c222fa49`, 109 524 bytes, SHA-256 `b69c25b3f469fc6fb793b16569c53a63a7333c32d83c96de4d97b6fb71bdb8ef`), `v22.4.r-fx4b` (state at `2c963e3a`, 108 496 bytes, SHA-256 `a21f35c990cc33737620597d883c4bd205fc4495bf2291a1b6013af6f2b06307`), `v22.4.r-fx3l` (state at `5cb2c17c`, 107 340 bytes, SHA-256 `b55b94d8734baf1cf763dfefb380a561029bd00d4a645cdcef3b75d99e6f010e`), `v22.4.r-fx2d` (state at `abc3a72a`, 106 788 bytes, SHA-256 `d212cf8def6f239db997cd45a73304db9bcaf981375e55fdfc2ca2862718832a`) and `v22.4.r-fx1d` (state at `11199347`, 105 968 bytes, SHA-256 `7f9f9a34b5b19a0245f0ab15426d891adc4f00505c86236cadec167e0402925b`).
 - These two were built from `db9d3dd` plus the same changes as patch files. Their code matches the branch, only some comments differ.
 
 ## Flash (ST ROM DFU, front USB-B jack)
@@ -210,11 +229,13 @@ The tested binary is `v22.4.r-fx5a`: 109 524 bytes, SHA-256 `b69c25b3f469fc6fb79
    ```
 
    Optionally read back again and compare the first bytes with `ACDC.bin`.
-4. **Leave DFU with a full power cycle:** case power off **and** USB unplugged, then case on, then USB.
+4. **Leave DFU:** either read back once more with `:leave`, which makes the ROM DFU start the firmware (`dfu-util -d 0483:df11 -a 0 -s 0x08000000:131072:leave -U readback.bin`; dfu-util then reports an error because the device is gone, that is expected), or do a full power cycle: case power off **and** USB unplugged (USB alone powers the board and keeps it in DFU), then case on, then USB. On the tested module both gave the same noise.
 
 Patches stored in QSPI flash and the device settings are not touched by flashing the internal flash. On the tested module, slots and storage were identical before and after.
 
 ## Test status
+
+`v22.4.r-fx7a` and `v22.4.r-fx6a`: see "LEDs" above. Flashed and read back, version, slots and storage unchanged after flashing.
 
 `v22.4.r-fx5a`: see "MIDI send path" above. Flashed and read back, version, slots and storage unchanged after flashing.
 
@@ -271,10 +292,10 @@ Levels are in dBFS of the USB stream (16 bit), inputs open, gain knob at 12 o'cl
 - **Ground loops:** A loop appeared only in a measurement setup where the AC/DC was on a computer port and an audio interface fed from its outputs was on a hub. With both devices on the same hub it was gone. No USB isolator was needed.
 - **Not addressed:**
   - the 1 kHz comb in recordings (it is in the ADC data while USB is active)
-  - the LED PWM line at ≈ 2321 Hz (visible with signal)
+  - the LED PWM line at ≈ 2321 Hz: moved to 48 kHz with `v22.4.r-fx7a`, see "LEDs"
   - the rest of the fs/8 line (≈ 5 dB lower with `v22.4.r-fx3l`)
 
-  Possible next experiments: block size 16, LED PWM moved out of the audio band, codec high-pass filter.
+  Possible next experiments: block size 16, codec high-pass filter.
 
 ---
 
