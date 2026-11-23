@@ -67,11 +67,13 @@ void device_reset_to(uint32_t address){
 }
 
 void device_cache_invalidate(){
-#ifdef USE_ICACHE
-  SCB_InvalidateICache();
-#endif
+  // Patch code was copied by the CPU through the data side: write it back to RAM first,
+  // then drop stale instructions (messlog D87)
 #ifdef USE_DCACHE
   SCB_CleanInvalidateDCache();
+#endif
+#ifdef USE_ICACHE
+  SCB_InvalidateICache();
 #endif
 }
 

@@ -125,12 +125,6 @@ int main(void)
   SCB_InvalidateICache();
   SCB_EnableICache();
 #endif
-#ifdef USE_DCACHE
-  /* Enable D-Cache-------------------------------------------------------------*/
-  /* Before enabling the data cache, you must invalidate the entire data cache (SCB_InvalidateDCache), because external memory might have changed from when the cache was disabled. */
-  SCB_InvalidateDCache();
-  SCB_EnableDCache();
-#endif
 
   /* Enable D2 domain SRAM Clocks */
   /* presumably done in SystemInit by setting DATA_IN_D2_SRAM ? */
@@ -159,6 +153,12 @@ int main(void)
   /* USER CODE BEGIN SysInit */
 
   MPU_Config();
+#ifdef USE_DCACHE
+  /* Enable D-Cache only after MPU_Config(), so the DMA buffers are never cached (messlog D87) */
+  /* Before enabling the data cache, you must invalidate the entire data cache (SCB_InvalidateDCache), because external memory might have changed from when the cache was disabled. */
+  SCB_InvalidateDCache();
+  SCB_EnableDCache();
+#endif
 
   /* USER CODE END SysInit */
 

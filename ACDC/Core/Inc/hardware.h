@@ -17,13 +17,12 @@
 
 #define USE_FAST_POW_RESOURCES
 
-/* Instruction cache always on: the Release build never defines NDEBUG, so without this
-   both caches stayed off (messlog D83). The data cache stays off for now: it needs an MPU
-   region for the DMA buffers (_DMA_DATA is missing in the linker script). */
+/* Both caches always on: the Release build never defines NDEBUG, so without this both
+   caches stayed off (messlog D83). The DMA buffers (codec_txbuf, codec_rxbuf, adc_values,
+   all in .dmadata from _DMA_DATA, Hardware/xibeca.ld) stay uncached through an MPU region
+   in Source/mpu.c, so no cache maintenance is needed in the audio block (messlog D87). */
 #define USE_ICACHE
-#ifdef NDEBUG
 #define USE_DCACHE
-#endif
 
 #define ARM_CYCLES_PER_SAMPLE       (480000000/AUDIO_SAMPLINGRATE) /* 480MHz / 48kHz */
 

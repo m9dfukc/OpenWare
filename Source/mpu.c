@@ -16,7 +16,7 @@ void MPU_Config(void){
   /* Configure the MPU attributes for DMA RAM */
 #ifdef USE_DCACHE // only the data cache needs the DMA buffers uncached
   // D2 DMA buffers: cache off
-  // TEX=1 C=0 B=0 S=1: Normal Non-cacheable
+  // TEX=1 C=0 B=0 S=0: Normal Non-cacheable (TEX=1 C=0 B=1 is reserved in ARMv7-M)
   extern char _DMA_DATA;
   MPU_InitStruct.Enable = MPU_REGION_ENABLE;
   MPU_InitStruct.Number = 1 << region_number++; // MPU_REGION_NUMBER0
@@ -28,7 +28,7 @@ void MPU_Config(void){
   MPU_InitStruct.DisableExec = MPU_INSTRUCTION_ACCESS_ENABLE;
   MPU_InitStruct.IsShareable = MPU_ACCESS_NOT_SHAREABLE;
   MPU_InitStruct.IsCacheable = MPU_ACCESS_NOT_CACHEABLE;
-  MPU_InitStruct.IsBufferable = MPU_ACCESS_BUFFERABLE;
+  MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
 #endif /* USE_DCACHE */
 
