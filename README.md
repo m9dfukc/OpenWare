@@ -15,9 +15,9 @@ Discussion: [AC/DC as FX when not connected to computer (#2244)](https://communi
 | Branch | Firmware version | Content |
 |---|---|---|
 | `acdc/thru-usb-feedback` | `v22.4.r-thru1d` | Standalone pass-through + USB fixes. The computer records the patch output (stock routing) |
-| **`acdc/fx1d`** (this one) | `v22.4.r-fx7a` | as above + the computer records the raw inputs, USB product string `OWL-ACDC-FX`, input LEDs show the raw level while recording, hot path in ITCM, boot menu to choose the patch slot, MIDI send path fixed, LED mode (normal / clip only / off), LED PWM at 48 kHz |
+| **`acdc/fx1d`** (this one) | `v22.4.r-fx8a` | as above + the computer records the raw inputs, USB product string `OWL-ACDC-FX`, input LEDs show the raw level while recording, hot path in ITCM, boot menu to choose the patch slot, MIDI send path fixed, LED mode (normal / clip only / off), LED PWM at 48 kHz, instruction cache on |
 
-The branch name is historical: `v22.4.r-fx1d` is commit `11199347` on this branch (raw inputs to USB, LEDs unchanged), `v22.4.r-fx2d` is `abc3a72a` (raw input LEDs, code in flash), `v22.4.r-fx3l` is `5cb2c17c` (hot path in ITCM, slot 1 always starts), `v22.4.r-fx4b` is `2c963e3a` (boot menu), `v22.4.r-fx5a` is `c222fa49` (MIDI send path), `v22.4.r-fx6a` is `34782dea` (LED mode).
+The branch name is historical: `v22.4.r-fx1d` is commit `11199347` on this branch (raw inputs to USB, LEDs unchanged), `v22.4.r-fx2d` is `abc3a72a` (raw input LEDs, code in flash), `v22.4.r-fx3l` is `5cb2c17c` (hot path in ITCM, slot 1 always starts), `v22.4.r-fx4b` is `2c963e3a` (boot menu), `v22.4.r-fx5a` is `c222fa49` (MIDI send path), `v22.4.r-fx6a` is `34782dea` (LED mode), `v22.4.r-fx7a` is `351b2071` (LED PWM at 48 kHz).
 
 ## Base: why v22.4.r and not v22.5.0
 
@@ -56,6 +56,8 @@ The base is upstream commit `db9d3dd` ("v22.4.r: MCLK=512fs", 2022-07-13) on Mar
 | `34782dea` | Version `v22.4.r-fx6a` | |
 | `bd5ee463` | **LED PWM at 48 kHz, locked to the sample clock** (was 2320.54 Hz) | See "LEDs" below |
 | `351b2071` | Version `v22.4.r-fx7a` | |
+| `8a401e75` | **Instruction cache on** (was off in every Release build) | See "Instruction cache" below |
+| `f9f9399a` | Version `v22.4.r-fx8a` | |
 
 ### USB feedback fix (`6753794f`)
 
@@ -180,6 +182,20 @@ Stock OpenWare always starts slot 1 at power-on, and the AC/DC has no button to 
 
 **Known issue (older than these builds, also in `v22.4.r-fx5a`):** a Program Change while the USB audio stream is open breaks playback until the next stream start (about 10 % silence on all outputs, the device reports `fb clamp`). Change the patch before opening the stream.
 
+## Instruction cache (`v22.4.r-fx8a`)
+
+**The caches were off.** `ACDC/Core/Inc/hardware.h` defines `USE_ICACHE` and `USE_DCACHE` only `#ifdef NDEBUG`, and the Release build (`Hardware/owl3.mk`) never defines `NDEBUG`. This is the same in v22.5.0 and upstream `master`. On the module, SCB->CCR reads 0 under `v22.4.r-fx7a`: neither cache is on. Patch code was fetched over the bus for every instruction. A plate reverb patch linked to AXI SRAM needed 5000 cycles per sample for about 1000 instructions, a plain read loop took about 24 cycles per iteration whether the data was in ITCM, DTCM or AXI SRAM.
+
+**Change (`8a401e75`):** `USE_ICACHE` is always defined. `USE_DCACHE` stays behind `NDEBUG`, so the data cache stays off: it needs an MPU region that keeps the DMA buffers uncached, and `_DMA_DATA` is not defined in the ACDC linker script. That region in `Source/mpu.c` is therefore tied to `USE_DCACHE` only (it was `USE_ICACHE || USE_DCACHE`, which would fail to link).
+- The firmware already invalidates the I-cache after copying a patch and before starting it (`device_cache_invalidate()` in `PatchDefinition.hpp`) and before jumping to the bootloader. With `USE_ICACHE` these calls now do something.
+- ITCM and DTCM bypass the cache. The hot path in ITCM is unchanged (byte identical with `v22.4.r-fx7a`). Patches linked to DTCM (`patchram`, the default of the patch library) fetch their instructions as before and are not faster; patches linked to AXI SRAM (`plusram`) and firmware code in flash are.
+
+**Measured** on one module:
+- The plate reverb patch: 3540 instead of 5050 cycles per sample, 35 % instead of 51 % CPU. The read loop now shows the data paths themselves: ITCM/DTCM 5–6, AXI SRAM 15 (no data cache), SDRAM 46 cycles per access.
+- Patches in DTCM: unchanged (an allpass chain 70 % with `v22.4.r-fx7a`, 71 % with `v22.4.r-fx8a`, same knob positions).
+- Program change through all twelve slots and RAM uploads in between: every patch runs and reports.
+- Noise against `v22.4.r-fx7a` (`v22.4.r-fx8a` before and after, `v22.4.r-fx7a` in the middle): the fs/8 line at 6 kHz **+0.6 dB** in all four runs, mixing products +1 … +3 dB, RMS, residual and comb unchanged, no new line. USB loop-back (4 sines, 60 s): no slips, no stale samples. 240 of 240 slot downloads intact.
+
 ## Input LEDs (`6d3b8bd5`)
 
 Each input has a green level LED and a red clip LED. The four green output LEDs are unchanged (the firmware measures the DAC data).
@@ -208,9 +224,9 @@ make -C ACDC CONFIG=Release TOOLROOT=/path/to/arm-gnu-toolchain/bin/ all
 # result: ACDC/Build/ACDC.bin (≈ 107 KB, must stay below 128 KB internal flash)
 ```
 
-The tested binary is `v22.4.r-fx7a`: 110 088 bytes, SHA-256 `cac6fee0f86426aed3d9b5bfaa2ff758b69de59ed7e11971f2a2ba0d0233ff20`.
+The tested binary is `v22.4.r-fx8a`: 110 208 bytes, SHA-256 `e1b1097b21008486acc4cda4b446a0e72fcd2e974ef0f5b97c6a707e6086f39a`.
 - A build of this branch with Arm GNU Toolchain 12.2.Rel1 and `CONFIG=Release` is byte identical to it.
-- Earlier tested binaries: `v22.4.r-fx6a` (state at `34782dea`, 110 088 bytes, SHA-256 `6a3fc427b30ae1043b239f01e5ecf9894db92d9a6ca3dc51b47cc9a6f80260eb`), `v22.4.r-fx5a` (state at `c222fa49`, 109 524 bytes, SHA-256 `b69c25b3f469fc6fb793b16569c53a63a7333c32d83c96de4d97b6fb71bdb8ef`), `v22.4.r-fx4b` (state at `2c963e3a`, 108 496 bytes, SHA-256 `a21f35c990cc33737620597d883c4bd205fc4495bf2291a1b6013af6f2b06307`), `v22.4.r-fx3l` (state at `5cb2c17c`, 107 340 bytes, SHA-256 `b55b94d8734baf1cf763dfefb380a561029bd00d4a645cdcef3b75d99e6f010e`), `v22.4.r-fx2d` (state at `abc3a72a`, 106 788 bytes, SHA-256 `d212cf8def6f239db997cd45a73304db9bcaf981375e55fdfc2ca2862718832a`) and `v22.4.r-fx1d` (state at `11199347`, 105 968 bytes, SHA-256 `7f9f9a34b5b19a0245f0ab15426d891adc4f00505c86236cadec167e0402925b`).
+- Earlier tested binaries: `v22.4.r-fx7a` (state at `351b2071`, 110 088 bytes, SHA-256 `cac6fee0f86426aed3d9b5bfaa2ff758b69de59ed7e11971f2a2ba0d0233ff20`), `v22.4.r-fx6a` (state at `34782dea`, 110 088 bytes, SHA-256 `6a3fc427b30ae1043b239f01e5ecf9894db92d9a6ca3dc51b47cc9a6f80260eb`), `v22.4.r-fx5a` (state at `c222fa49`, 109 524 bytes, SHA-256 `b69c25b3f469fc6fb793b16569c53a63a7333c32d83c96de4d97b6fb71bdb8ef`), `v22.4.r-fx4b` (state at `2c963e3a`, 108 496 bytes, SHA-256 `a21f35c990cc33737620597d883c4bd205fc4495bf2291a1b6013af6f2b06307`), `v22.4.r-fx3l` (state at `5cb2c17c`, 107 340 bytes, SHA-256 `b55b94d8734baf1cf763dfefb380a561029bd00d4a645cdcef3b75d99e6f010e`), `v22.4.r-fx2d` (state at `abc3a72a`, 106 788 bytes, SHA-256 `d212cf8def6f239db997cd45a73304db9bcaf981375e55fdfc2ca2862718832a`) and `v22.4.r-fx1d` (state at `11199347`, 105 968 bytes, SHA-256 `7f9f9a34b5b19a0245f0ab15426d891adc4f00505c86236cadec167e0402925b`).
 - These two were built from `db9d3dd` plus the same changes as patch files. Their code matches the branch, only some comments differ.
 
 ## Flash (ST ROM DFU, front USB-B jack)
@@ -234,6 +250,8 @@ The tested binary is `v22.4.r-fx7a`: 110 088 bytes, SHA-256 `cac6fee0f86426aed3d
 Patches stored in QSPI flash and the device settings are not touched by flashing the internal flash. On the tested module, slots and storage were identical before and after.
 
 ## Test status
+
+`v22.4.r-fx8a`: see "Instruction cache" above. Flashed and read back, version, slots and storage unchanged after flashing.
 
 `v22.4.r-fx7a` and `v22.4.r-fx6a`: see "LEDs" above. Flashed and read back, version, slots and storage unchanged after flashing.
 
@@ -266,6 +284,7 @@ So on this module the **position of code and data in memory** changes the block-
 Consequences:
 - Any firmware change can move these lines by a few dB, even if it only touches code outside the audio path. Comparisons between builds measure the code **and** its layout.
 - `v22.4.r-fx2d` therefore keeps every existing address and only appends code.
+- Up to `v22.4.r-fx7a` both caches were off (see "Instruction cache"), so flash wait states hit every instruction fetch outside ITCM.
 - `v22.4.r-fx3l` removes the dependence: with the periodic code in ITCM, 0x150 bytes of padding in flash change no measure by more than 0.25 dB (see "ITCM hot path").
 
 ## Measurements (one module, macOS, Eurorack case)
