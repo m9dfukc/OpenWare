@@ -14,7 +14,7 @@ void MPU_Config(void){
   size_t region_number = 0;
 
   /* Configure the MPU attributes for DMA RAM */
-#if defined USE_ICACHE || defined USE_DCACHE
+#ifdef USE_DCACHE // only the data cache needs the DMA buffers uncached
   // D2 DMA buffers: cache off
   // TEX=1 C=0 B=0 S=1: Normal Non-cacheable
   extern char _DMA_DATA;
@@ -30,7 +30,7 @@ void MPU_Config(void){
   MPU_InitStruct.IsCacheable = MPU_ACCESS_NOT_CACHEABLE;
   MPU_InitStruct.IsBufferable = MPU_ACCESS_BUFFERABLE;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
-#endif /* USE_ICACHE || USE_DCACHE */
+#endif /* USE_DCACHE */
 
   /* Configure the MPU attributes for SDRAM */
 #if 0 // using defaults

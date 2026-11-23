@@ -17,8 +17,11 @@
 
 #define USE_FAST_POW_RESOURCES
 
-#ifdef NDEBUG
+/* Instruction cache always on: the Release build never defines NDEBUG, so without this
+   both caches stayed off (messlog D83). The data cache stays off for now: it needs an MPU
+   region for the DMA buffers (_DMA_DATA is missing in the linker script). */
 #define USE_ICACHE
+#ifdef NDEBUG
 #define USE_DCACHE
 #endif
 
